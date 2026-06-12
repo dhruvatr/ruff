@@ -71,19 +71,49 @@ pub(in crate::docstring) fn sections(source: &str) -> impl Iterator<Item = Secti
 pub(in crate::docstring) struct Section {
     kind: SectionKind,
     range: TextRange,
-    fragments: Vec<BodyFragment>,
+    body: SectionBody,
 }
 
 impl Section {
     /// Consumes this section and returns its canonical kind, source range, and body.
     fn into_parts(self) -> (SectionKind, TextRange, Vec<BodyFragment>) {
-        (self.kind, self.range, self.fragments)
+        (self.kind, self.range, self.body.fragments)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SectionBody {
+    fragments: Vec<BodyFragment>,
+    /// Whether the structured Markdown renderer can represent the body without changing its
+    /// meaning.
+    is_renderable: bool,
+}
+
+impl SectionBody {
+    /// Creates a renderable body containing the description as a single prose fragment.
+    fn from_prose(description: String) -> Self {
+        let fragments = (!description.is_empty())
+            .then_some(BodyFragment::Prose(description))
+            .into_iter()
+            .collect();
+        Self {
+            fragments,
+            is_renderable: true,
+        }
+    }
+
+    /// Creates an unrenderable body for a section whose contents remain opaque.
+    fn opaque() -> Self {
+        Self {
+            fragments: Vec::new(),
+            is_renderable: false,
+        }
     }
 }
 
 /// One parsed fragment in a Google section body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BodyFragment {
+pub(in crate::docstring) enum BodyFragment {
     /// Section-level prose that is not attached to a named item.
     Prose(String),
     /// A named item and its description.
@@ -92,7 +122,7 @@ enum BodyFragment {
 
 /// A named item in a Google section.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Item {
+pub(in crate::docstring) struct Item {
     display_name: String,
     ty: Option<String>,
     description: String,
@@ -100,7 +130,7 @@ struct Item {
 
 impl Item {
     /// Consumes this item and returns its display parts.
-    fn into_parts(self) -> (String, Option<String>, String) {
+    pub(in crate::docstring) fn into_parts(self) -> (String, Option<String>, String) {
         (self.display_name, self.ty, self.description)
     }
 }
@@ -369,7 +399,18 @@ impl<'a> SectionBuilder<'a> {
             return true;
         }
 
-        let item_line = ItemLine::classify(self.section_header.kind, line);
+        let also_parses_as_section_header = line_header.is_some()
+            && line
+                .text
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase);
+        let item_line = ItemLine::classify(
+            self.section_header.kind,
+            line,
+            also_parses_as_section_header,
+        );
         let has_leading_blank_lines = !self.pending_blank_lines.is_empty();
 
         if self.ends_before(
@@ -449,18 +490,18 @@ impl<'a> SectionBuilder<'a> {
 
     fn push_content_line(&mut self, line: ParsedLine<'a>, item_line: ItemLine<'a>) {
         self.range = self.range.cover(line.range);
-        self.body.push_line(line, item_line);
+        self.body.push_line(self.section_header, line, item_line);
     }
 
     fn finish(self) -> Option<Section> {
         let HeaderKind::Structured(kind) = self.section_header.kind else {
             return None;
         };
-        let fragments = self.body.finish();
+        let body = self.body.finish();
         Some(Section {
             kind,
             range: self.range,
-            fragments,
+            body,
         })
     }
 }
@@ -493,30 +534,23 @@ impl<'a> BodyBuilder<'a> {
         }
     }
 
-    fn push_line(&mut self, line: ParsedLine<'a>, item_line: ItemLine<'a>) {
+    fn push_line(&mut self, section_header: Header, line: ParsedLine<'a>, item_line: ItemLine<'a>) {
         match self {
-            Self::ItemList(body) => body.push_line(line, item_line),
+            Self::ItemList(builder) => builder.push_line(section_header, line, item_line),
             Self::Prose(builder) => builder.push_line(line.text),
             Self::Opaque => {}
         }
     }
 
-    fn finish(self) -> Vec<BodyFragment> {
+    fn finish(self) -> SectionBody {
         match self {
-            Self::ItemList(body) => body.finish(),
-            Self::Prose(description) => {
-                let prose = description.finish();
-                (!prose.is_empty())
-                    .then_some(BodyFragment::Prose(prose))
-                    .into_iter()
-                    .collect()
-            }
-            Self::Opaque => Vec::new(),
+            Self::ItemList(builder) => builder.finish(),
+            Self::Prose(builder) => SectionBody::from_prose(builder.finish()),
+            Self::Opaque => SectionBody::opaque(),
         }
     }
 }
 
-#[derive(Default)]
 struct ItemListBuilder<'a> {
     fragments: Vec<BodyFragment>,
     current_item: Option<ItemBuilder<'a>>,
@@ -524,6 +558,23 @@ struct ItemListBuilder<'a> {
     leading_prose: DescriptionBuilder<'a>,
     /// Indentation established by the first renderable item.
     item_indent: Option<TextSize>,
+    /// Whether every line seen so far can be rendered faithfully as Markdown.
+    is_renderable: bool,
+}
+
+impl Default for ItemListBuilder<'_> {
+    /// Creates an empty builder that is renderable by default (meaning that we
+    /// must actually encounter an unrenderable line in order to prevent
+    /// rendering an item list as Markdown).
+    fn default() -> Self {
+        Self {
+            fragments: Vec::new(),
+            current_item: None,
+            leading_prose: DescriptionBuilder::default(),
+            item_indent: None,
+            is_renderable: true,
+        }
+    }
 }
 
 impl<'a> ItemListBuilder<'a> {
@@ -535,7 +586,7 @@ impl<'a> ItemListBuilder<'a> {
         }
     }
 
-    fn push_line(&mut self, line: ParsedLine<'a>, item_line: ItemLine<'a>) {
+    fn push_line(&mut self, section_header: Header, line: ParsedLine<'a>, item_line: ItemLine<'a>) {
         let line_indent = indentation(line.text);
         if self
             .item_indent
@@ -546,12 +597,20 @@ impl<'a> ItemListBuilder<'a> {
             self.finish_current_item();
             self.current_item = Some(ItemBuilder::new(&item_header));
             self.item_indent.get_or_insert(line_indent);
+            self.is_renderable &= !item_line.also_parses_as_section_header;
             return;
+        }
+
+        if let Some(item_indent) = self.item_indent
+            && !item_line.can_render_as_continuation(section_header.kind, line_indent, item_indent)
+        {
+            self.is_renderable = false;
         }
 
         if let Some(item) = &mut self.current_item {
             item.description.push_continuation(line.text);
         } else {
+            self.is_renderable = false;
             self.leading_prose.push_line(line.text);
         }
     }
@@ -569,10 +628,13 @@ impl<'a> ItemListBuilder<'a> {
         }
     }
 
-    fn finish(mut self) -> Vec<BodyFragment> {
+    fn finish(mut self) -> SectionBody {
         self.finish_leading_prose();
         self.finish_current_item();
-        self.fragments
+        SectionBody {
+            fragments: self.fragments,
+            is_renderable: self.is_renderable,
+        }
     }
 }
 
@@ -667,10 +729,33 @@ struct ItemLine<'a> {
     /// Whether this line establishes item indentation for section-boundary detection.
     boundary_item: bool,
     item_header: Option<ItemHeader<'a>>,
+    /// Whether this line resembles an item but is actually a URL or path continuation.
+    is_item_like_continuation: bool,
+    /// Whether this item could instead introduce a new section.
+    also_parses_as_section_header: bool,
 }
 
 impl<'a> ItemLine<'a> {
-    fn classify(section_kind: HeaderKind, line: ParsedLine<'a>) -> Self {
+    fn can_render_as_continuation(
+        &self,
+        section_kind: HeaderKind,
+        line_indent: TextSize,
+        item_indent: TextSize,
+    ) -> bool {
+        // More deeply indented lines are unambiguously part of the current item.
+        line_indent > item_indent
+            // Although the style guide suggests indenting continuation lines,
+            // aligned parameter prose is common in practice.
+            || (line_indent == item_indent && section_kind.is_parameter_section())
+            // Aligned URLs and paths are continuations despite resembling item headers.
+            || (line_indent == item_indent && self.is_item_like_continuation)
+    }
+
+    fn classify(
+        section_kind: HeaderKind,
+        line: ParsedLine<'a>,
+        also_parses_as_section_header: bool,
+    ) -> Self {
         let HeaderKind::Structured(kind) = section_kind else {
             return Self::default();
         };
@@ -722,6 +807,21 @@ impl<'a> ItemLine<'a> {
             SectionKind::Returns | SectionKind::Yields => return Self::default(),
         };
 
+        // URLs (`https://...`), Windows paths (`C:\\...`), and reST literal-block introductions
+        // (`Example::`) are description continuations rather than item headers.
+        //
+        // This was configured from a survey of such continuations in popular public projects that
+        // use Google-style docstrings; it may need to be reconfigured in the future.
+        if matches!(
+            inline_description.as_bytes().first(),
+            Some(b'/' | b'\\' | b':')
+        ) {
+            return Self {
+                is_item_like_continuation: true,
+                ..Self::default()
+            };
+        }
+
         Self {
             boundary_item: true,
             item_header: Some(ItemHeader {
@@ -729,6 +829,8 @@ impl<'a> ItemLine<'a> {
                 ty,
                 inline_description,
             }),
+            is_item_like_continuation: false,
+            also_parses_as_section_header,
         }
     }
 }
@@ -1428,7 +1530,7 @@ Returns:
 Methods:
     helper: Method documentation.";
         let sections = sections(raw)
-            .map(|section| (section.kind, section.fragments, &raw[section.range]))
+            .map(|section| (section.kind, section.body.fragments, &raw[section.range]))
             .collect::<Vec<_>>();
 
         assert_eq!(
