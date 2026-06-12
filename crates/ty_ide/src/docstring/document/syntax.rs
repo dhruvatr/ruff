@@ -21,9 +21,9 @@ pub(super) fn parsed_lines(source: &str) -> Vec<ParsedLine<'_>> {
 
 /// A docstring line and its source range, excluding the newline terminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ParsedLine<'a> {
+pub(in crate::docstring) struct ParsedLine<'a> {
     /// The line text, excluding its newline terminator.
-    pub(super) text: &'a str,
+    pub(in crate::docstring) text: &'a str,
     /// The byte range of `text` within the source document.
     pub(super) range: TextRange,
     /// The indentation in the source document.

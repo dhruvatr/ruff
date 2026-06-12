@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 use strum_macros::EnumIter;
 
 pub(super) mod google;
+mod numpy;
 pub(super) mod preformatted;
 pub(super) mod rst;
 pub(in crate::docstring) mod syntax;
@@ -11,11 +12,11 @@ pub(in crate::docstring) mod syntax;
 /// `normalized_source` must have already undergone PEP-257 trimming and universal newline
 /// normalization.
 pub(super) fn parameter_documentation(
+    raw_source: &str,
     normalized_source: &str,
-    numpy_parameters: IndexMap<String, String>,
 ) -> IndexMap<String, String> {
     let mut parameters = google::parameter_documentation(normalized_source);
-    parameters.extend(numpy_parameters);
+    parameters.extend(numpy::parameter_documentation(raw_source));
     parameters.extend(rst::parameter_documentation(normalized_source));
     parameters
 }
