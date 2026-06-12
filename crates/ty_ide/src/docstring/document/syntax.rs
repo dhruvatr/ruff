@@ -8,7 +8,7 @@ use super::rst::is_field_list_marker;
 /// source ranges.
 ///
 /// For example, `first\r\nsecond` yields `first` at offset 0 and `second` at offset 7.
-pub(super) fn parsed_lines(source: &str) -> Vec<ParsedLine<'_>> {
+pub(in crate::docstring) fn parsed_lines(source: &str) -> Vec<ParsedLine<'_>> {
     source
         .universal_newlines()
         .map(|line| ParsedLine {
@@ -25,7 +25,7 @@ pub(in crate::docstring) struct ParsedLine<'a> {
     /// The line text, excluding its newline terminator.
     pub(in crate::docstring) text: &'a str,
     /// The byte range of `text` within the source document.
-    pub(super) range: TextRange,
+    pub(in crate::docstring) range: TextRange,
     /// The indentation in the source document.
     pub(super) indent: TextSize,
 }
@@ -98,7 +98,7 @@ fn is_rest_directive_marker(line: &str) -> bool {
 ///
 /// If square or curly brackets are unclosed, falls back to the first colon outside parentheses.
 /// This preserves item parsing for malformed type annotations.
-pub(super) fn split_once_at_top_level_colon(line: &str) -> Option<(&str, &str)> {
+pub(in crate::docstring) fn split_once_at_top_level_colon(line: &str) -> Option<(&str, &str)> {
     let mut nesting = BracketNesting::default();
     let mut fallback_colon = None;
     let mut index = 0;
@@ -243,7 +243,7 @@ pub(super) fn split_trailing_parenthesized_group(value: &str) -> Option<(&str, &
 }
 
 /// Calculates indentation width, advancing tabs to the next multiple of eight columns.
-pub(super) fn indentation(line: &str) -> TextSize {
+pub(in crate::docstring) fn indentation(line: &str) -> TextSize {
     TextSize::new(
         leading_indentation(line)
             .bytes()

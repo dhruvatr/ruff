@@ -9,16 +9,18 @@ use crate::docstring::document::preformatted::MarkdownFence;
 use crate::docstring::document::syntax::{is_markdown_code_span, starts_with_markdown_list_item};
 
 mod google;
+mod numpy;
 mod rst;
 
 /// Renders a docstring as Markdown.
 ///
-/// `source` must have already undergone PEP-257 trimming and universal newline
-/// normalization (typically via `docstring::documentation_trim`).
-pub(super) fn render_into(output: &mut String, source: &str) {
-    let mut sections = rst::structured_sections(source);
-    sections.extend(google::structured_sections(source));
-    render_sections_into(output, source, sections);
+/// `raw_source` is used to identify top-level NumPy sections. `normalized_source`
+/// must have already undergone PEP-257 trimming and universal newline normalization.
+pub(super) fn render_into(output: &mut String, raw_source: &str, normalized_source: &str) {
+    let mut sections = rst::structured_sections(normalized_source);
+    sections.extend(google::structured_sections(normalized_source));
+    sections.extend(numpy::structured_sections(raw_source, normalized_source));
+    render_sections_into(output, normalized_source, sections);
 }
 
 /// Renders a docstring from non-overlapping structured sections and general source fragments.

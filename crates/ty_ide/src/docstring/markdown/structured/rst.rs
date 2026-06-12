@@ -833,7 +833,8 @@ Summary.
 
     fn render_docstring(raw: &str) -> String {
         let mut output = String::new();
-        render_into(&mut output, raw);
+        // These fixtures are already normalized, so both inputs are identical.
+        render_into(&mut output, raw, raw);
         output
     }
 

@@ -16,7 +16,7 @@ use super::syntax::{
 pub(super) fn parameter_documentation(raw_source: &str) -> IndexMap<String, String> {
     let mut parameters = IndexMap::new();
 
-    for section in sections(raw_source) {
+    for section in parse_sections(raw_source, SectionIndentation::Structural) {
         let (kind, _, fragments) = section.into_parts();
         if matches!(kind, SectionKind::Parameters | SectionKind::OtherParameters) {
             extend_parameter_documentation(&mut parameters, fragments);
@@ -26,22 +26,37 @@ pub(super) fn parameter_documentation(raw_source: &str) -> IndexMap<String, Stri
     parameters
 }
 
-/// Returns recognized top-level NumPy-style sections in source order.
-fn sections(source: &str) -> impl Iterator<Item = Section> {
-    let lines = parsed_lines(source);
-    Parser::new().parse(&lines).into_iter()
+/// Returns recognized NumPy-style sections in normalized source order.
+pub(in crate::docstring) fn sections(raw_source: &str, normalized_source: &str) -> Vec<Section> {
+    let line_offsets = NormalizedLineOffsets::new(raw_source, normalized_source);
+    let raw_starts = parse_sections(raw_source, SectionIndentation::Structural)
+        .filter_map(|section| line_offsets.normalized(section.range.start()))
+        .collect::<Vec<_>>();
+
+    parse_sections(normalized_source, SectionIndentation::Source)
+        .filter(|section| raw_starts.binary_search(&section.range.start()).is_ok())
+        .collect()
 }
 
+/// A recognized NumPy-style docstring section.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Section {
+pub(in crate::docstring) struct Section {
     kind: SectionKind,
     range: TextRange,
     body: SectionBody,
 }
 
 impl Section {
+    /// Consumes this section and returns its canonical kind, source range, and body.
     fn into_parts(self) -> (SectionKind, TextRange, Vec<BodyFragment>) {
         (self.kind, self.range, self.body.fragments)
+    }
+
+    /// Consumes this section when it can be rendered structurally.
+    pub(in crate::docstring) fn into_renderable_parts(
+        self,
+    ) -> Option<(SectionKind, TextRange, Vec<BodyFragment>)> {
+        self.body.is_renderable.then(|| self.into_parts())
     }
 }
 
@@ -62,7 +77,7 @@ impl SectionBody {
 
 /// One parsed fragment in a NumPy section body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BodyFragment {
+pub(in crate::docstring) enum BodyFragment {
     /// Section-level prose that precedes the first named item.
     Prose(String),
     /// A named or anonymous section item.
@@ -71,7 +86,7 @@ enum BodyFragment {
 
 /// A parsed item in a NumPy section.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Item {
+pub(in crate::docstring) struct Item {
     display_name: Option<String>,
     ty: Option<String>,
     description: String,
@@ -79,8 +94,37 @@ struct Item {
 
 impl Item {
     /// Consumes this item and returns its display parts.
-    fn into_parts(self) -> (Option<String>, Option<String>, String) {
+    pub(in crate::docstring) fn into_parts(self) -> (Option<String>, Option<String>, String) {
         (self.display_name, self.ty, self.description)
+    }
+}
+
+/// Maps source-line starts to their offsets after PEP 257 normalization.
+struct NormalizedLineOffsets {
+    offsets: Vec<(TextSize, TextSize)>,
+}
+
+impl NormalizedLineOffsets {
+    fn new(raw_source: &str, normalized_source: &str) -> Self {
+        let raw_lines = super::syntax::parsed_lines(raw_source);
+        let normalized_lines = super::syntax::parsed_lines(normalized_source);
+        let first_content_line = raw_lines
+            .iter()
+            .position(|line| !line.text.trim().is_empty())
+            .unwrap_or(raw_lines.len());
+        let offsets = raw_lines[first_content_line..]
+            .iter()
+            .zip(normalized_lines)
+            .map(|(raw, normalized)| (raw.range.start(), normalized.range.start()))
+            .collect();
+        Self { offsets }
+    }
+
+    fn normalized(&self, raw_offset: TextSize) -> Option<TextSize> {
+        self.offsets
+            .binary_search_by_key(&raw_offset, |&(raw_start, _)| raw_start)
+            .ok()
+            .map(|index| self.offsets[index].1)
     }
 }
 
@@ -145,18 +189,29 @@ fn container_block_end(lines: &[NumpyLine<'_>], index: usize) -> Option<usize> {
     )
 }
 
-#[derive(Default)]
+fn parse_sections(
+    source: &str,
+    section_indentation: SectionIndentation,
+) -> impl Iterator<Item = Section> + '_ {
+    let lines = parsed_lines(source);
+    Parser::new(section_indentation).parse(&lines).into_iter()
+}
+
 struct Parser {
+    section_indentation: SectionIndentation,
     sections: Vec<Section>,
 }
 
 impl Parser {
-    fn new() -> Self {
-        Self::default()
+    fn new(section_indentation: SectionIndentation) -> Self {
+        Self {
+            section_indentation,
+            sections: Vec::new(),
+        }
     }
 
     fn parse(mut self, lines: &[NumpyLine<'_>]) -> Vec<Section> {
-        let top_level_indent = effective_top_level_indent(lines);
+        let top_level_indent = effective_top_level_indent(lines, self.section_indentation);
         let mut preformatted_blocks = PreformattedBlockScanner::default();
         let mut index = 0;
 
@@ -170,8 +225,10 @@ impl Parser {
                 continue;
             }
 
-            let Some(header) = parse_section_header(lines, index) else {
-                if let Some(section_end) = underlined_section_end(lines, index) {
+            let Some(header) = parse_section_header(lines, index, self.section_indentation) else {
+                if let Some(section_end) =
+                    underlined_section_end(lines, index, self.section_indentation)
+                {
                     index = section_end;
                     continue;
                 }
@@ -179,12 +236,12 @@ impl Parser {
                 index += 1;
                 continue;
             };
-            if header.structural_indent != top_level_indent {
+            if header.indent(self.section_indentation) != top_level_indent {
                 index += 1;
                 continue;
             }
 
-            let (body_end, range) = section_body_end(lines, header);
+            let (body_end, range) = section_body_end(lines, header, self.section_indentation);
             self.sections.push(Section {
                 kind: header.kind,
                 range,
@@ -200,7 +257,10 @@ impl Parser {
     }
 }
 
-fn effective_top_level_indent(lines: &[NumpyLine<'_>]) -> TextSize {
+fn effective_top_level_indent(
+    lines: &[NumpyLine<'_>],
+    section_indentation: SectionIndentation,
+) -> TextSize {
     // PEP 257 ignores the first line's indentation, so a lone column-zero first line cannot
     // distinguish a nested block from a shifted top-level section. A later column-zero logical
     // line can prevent physically top-level lines after an escaped newline from being dedented.
@@ -226,8 +286,8 @@ fn effective_top_level_indent(lines: &[NumpyLine<'_>]) -> TextSize {
             continue;
         }
 
-        if let Some(header) = parse_section_header(lines, index) {
-            let header_indent = header.structural_indent;
+        if let Some(header) = parse_section_header(lines, index, section_indentation) {
+            let header_indent = header.indent(section_indentation);
             top_level_indent = Some(
                 top_level_indent
                     .map_or(header_indent, |indent: TextSize| indent.min(header_indent)),
@@ -235,7 +295,7 @@ fn effective_top_level_indent(lines: &[NumpyLine<'_>]) -> TextSize {
             index += 2;
             continue;
         }
-        if let Some(section_end) = underlined_section_end(lines, index) {
+        if let Some(section_end) = underlined_section_end(lines, index, section_indentation) {
             index = section_end;
             continue;
         }
@@ -247,11 +307,15 @@ fn effective_top_level_indent(lines: &[NumpyLine<'_>]) -> TextSize {
     top_level_indent.unwrap_or_default()
 }
 
-fn section_body_end(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> (usize, TextRange) {
+fn section_body_end(
+    lines: &[NumpyLine<'_>],
+    header: NumpySectionHeader,
+    section_indentation: SectionIndentation,
+) -> (usize, TextRange) {
     let mut body_end = header.body_start;
     let mut range = header.range;
     let mut preformatted_blocks = PreformattedBlockScanner::default();
-    let first_item = first_body_item_index(lines, header);
+    let first_item = first_body_item_index(lines, header, section_indentation);
 
     while let Some(line) = lines.get(body_end) {
         if preformatted_blocks.is_active()
@@ -272,7 +336,7 @@ fn section_body_end(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> (usi
         }
 
         if line.text.trim().is_empty() {
-            if !blank_line_continues_section(&lines[body_end..], header) {
+            if !blank_line_continues_section(&lines[body_end..], header, section_indentation) {
                 break;
             }
 
@@ -285,8 +349,8 @@ fn section_body_end(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> (usi
             continue;
         }
 
-        if underlined_section_indent(lines, body_end)
-            .is_some_and(|indent| indent <= header.structural_indent)
+        if underlined_section_indent(lines, body_end, section_indentation)
+            .is_some_and(|indent| indent <= header.indent(section_indentation))
         {
             break;
         }
@@ -307,7 +371,11 @@ fn section_body_end(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> (usi
     (body_end, range)
 }
 
-fn first_body_item_index(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> Option<usize> {
+fn first_body_item_index(
+    lines: &[NumpyLine<'_>],
+    header: NumpySectionHeader,
+    section_indentation: SectionIndentation,
+) -> Option<usize> {
     if !matches!(
         header.kind,
         SectionKind::Parameters | SectionKind::OtherParameters
@@ -323,8 +391,8 @@ fn first_body_item_index(lines: &[NumpyLine<'_>], header: NumpySectionHeader) ->
             continue;
         }
 
-        if underlined_section_indent(lines, index)
-            .is_some_and(|indent| indent <= header.structural_indent)
+        if underlined_section_indent(lines, index, section_indentation)
+            .is_some_and(|indent| indent <= header.indent(section_indentation))
         {
             return None;
         }
@@ -348,7 +416,11 @@ fn first_body_item_index(lines: &[NumpyLine<'_>], header: NumpySectionHeader) ->
     None
 }
 
-fn blank_line_continues_section(lines: &[NumpyLine<'_>], header: NumpySectionHeader) -> bool {
+fn blank_line_continues_section(
+    lines: &[NumpyLine<'_>],
+    header: NumpySectionHeader,
+    section_indentation: SectionIndentation,
+) -> bool {
     let Some((offset, non_blank_line)) = lines
         .iter()
         .enumerate()
@@ -357,8 +429,8 @@ fn blank_line_continues_section(lines: &[NumpyLine<'_>], header: NumpySectionHea
         return false;
     };
 
-    if underlined_section_indent(lines, offset)
-        .is_some_and(|indent| indent <= header.structural_indent)
+    if underlined_section_indent(lines, offset, section_indentation)
+        .is_some_and(|indent| indent <= header.indent(section_indentation))
     {
         return false;
     }
@@ -397,10 +469,29 @@ struct NumpySectionHeader {
     range: TextRange,
 }
 
-fn parse_section_header(lines: &[NumpyLine<'_>], index: usize) -> Option<NumpySectionHeader> {
+impl NumpySectionHeader {
+    fn indent(self, section_indentation: SectionIndentation) -> TextSize {
+        match section_indentation {
+            SectionIndentation::Source => self.raw_indent,
+            SectionIndentation::Structural => self.structural_indent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionIndentation {
+    Source,
+    Structural,
+}
+
+fn parse_section_header(
+    lines: &[NumpyLine<'_>],
+    index: usize,
+    section_indentation: SectionIndentation,
+) -> Option<NumpySectionHeader> {
     let line = lines.get(index)?;
     let underline = lines.get(index + 1)?;
-    underlined_section_indent(lines, index)?;
+    underlined_section_indent(lines, index, section_indentation)?;
 
     Some(NumpySectionHeader {
         kind: section_kind(line.text)?,
@@ -411,18 +502,34 @@ fn parse_section_header(lines: &[NumpyLine<'_>], index: usize) -> Option<NumpySe
     })
 }
 
-fn underlined_section_indent(lines: &[NumpyLine<'_>], index: usize) -> Option<TextSize> {
+fn underlined_section_indent(
+    lines: &[NumpyLine<'_>],
+    index: usize,
+    section_indentation: SectionIndentation,
+) -> Option<TextSize> {
     let line = lines.get(index)?;
     let underline = lines.get(index + 1)?;
+    let line_indent = match section_indentation {
+        SectionIndentation::Source => line.raw_indent,
+        SectionIndentation::Structural => line.structural_indent,
+    };
+    let underline_indent = match section_indentation {
+        SectionIndentation::Source => underline.raw_indent,
+        SectionIndentation::Structural => underline.structural_indent,
+    };
 
     (!line.text.trim().is_empty()
-        && underline.structural_indent == line.structural_indent
+        && underline_indent == line_indent
         && is_underline(underline.text))
-    .then_some(line.structural_indent)
+    .then_some(line_indent)
 }
 
-fn underlined_section_end(lines: &[NumpyLine<'_>], index: usize) -> Option<usize> {
-    let header_indent = underlined_section_indent(lines, index)?;
+fn underlined_section_end(
+    lines: &[NumpyLine<'_>],
+    index: usize,
+    section_indentation: SectionIndentation,
+) -> Option<usize> {
+    let header_indent = underlined_section_indent(lines, index, section_indentation)?;
     let mut section_end = index + 2;
     let mut preformatted_blocks = PreformattedBlockScanner::default();
 
@@ -431,7 +538,7 @@ fn underlined_section_end(lines: &[NumpyLine<'_>], index: usize) -> Option<usize
             section_end += 1;
             continue;
         }
-        if underlined_section_indent(lines, section_end)
+        if underlined_section_indent(lines, section_end, section_indentation)
             .is_some_and(|indent| indent <= header_indent)
         {
             break;
@@ -448,9 +555,9 @@ fn section_kind(line: &str) -> Option<SectionKind> {
         "parameters" => Some(SectionKind::Parameters),
         "other parameters" => Some(SectionKind::OtherParameters),
         "attributes" => Some(SectionKind::Attributes),
-        "returns" | "return" => Some(SectionKind::Returns),
-        "yields" | "yield" => Some(SectionKind::Yields),
-        "raises" | "raise" => Some(SectionKind::Raises),
+        "returns" => Some(SectionKind::Returns),
+        "yields" => Some(SectionKind::Yields),
+        "raises" => Some(SectionKind::Raises),
         _ => None,
     }
 }
@@ -500,7 +607,7 @@ fn untyped_item_starts(
 
 fn return_item_starts(line: &NumpyLine<'_>, following_lines: &[NumpyLine<'_>]) -> bool {
     let trimmed = line.text.trim();
-    if let Some(separator) = parse_type_separator(trimmed) {
+    if let Some(separator) = parse_return_type_separator(trimmed) {
         return !separator.requires_description_block
             || has_indented_description(line, following_lines);
     }
@@ -513,7 +620,7 @@ fn is_anonymous_return_type(line: &str) -> bool {
     !line.is_empty()
         && !line.ends_with('.')
         && !line.ends_with(':')
-        && (is_numpy_return_type_expression(line) || is_prose_return_type(line))
+        && is_numpy_return_type_expression(line)
 }
 
 fn is_numpy_return_type_expression(ty: &str) -> bool {
@@ -532,32 +639,12 @@ fn is_numpy_return_type_expression(ty: &str) -> bool {
     // Whitespace makes prose ambiguous, so require syntax that strongly indicates a type.
     is_subscript_style_numpy_return_type(ty)
         || ty.contains('|')
-        || is_call_style_numpy_return_type(ty)
         || is_conventional_spaced_numpy_return_type(ty)
 }
 
 fn is_subscript_style_numpy_return_type(ty: &str) -> bool {
     ty.split_once('[')
         .is_some_and(|(name, _)| is_numpy_return_type_atom(name) && ty.ends_with(']'))
-}
-
-fn is_call_style_numpy_return_type(ty: &str) -> bool {
-    let Some((name, arguments)) = split_trailing_parenthesized_group(ty) else {
-        return false;
-    };
-    let name = name.trim();
-    let arguments = arguments.trim();
-    if name.is_empty() || arguments.is_empty() {
-        return false;
-    }
-
-    ty.strip_prefix(name)
-        .is_some_and(|suffix| suffix.starts_with('('))
-        && !name.contains(['(', ')'])
-        && is_numpy_return_type_atom(name)
-        && arguments
-            .split(',')
-            .all(|argument| is_numpy_return_type_atom(argument.trim()))
 }
 
 fn is_conventional_spaced_numpy_return_type(ty: &str) -> bool {
@@ -604,15 +691,6 @@ fn is_numpy_return_type_start(ch: char) -> bool {
 
 fn is_numpy_return_type_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || "_.[](){},|\"':/ `~-".contains(ch)
-}
-
-fn is_prose_return_type(line: &str) -> bool {
-    line.chars()
-        .next()
-        .is_some_and(|char| char.is_ascii_lowercase())
-        && line
-            .chars()
-            .all(|char| char.is_ascii_alphanumeric() || matches!(char, '_' | '-' | '.' | ' '))
 }
 
 fn raise_item_starts(line: &NumpyLine<'_>) -> bool {
@@ -747,7 +825,7 @@ fn parse_named_item<'a>(line: &ParsedLine<'a>) -> Option<ItemBuilder<'a>> {
 
 fn parse_return_item<'a>(line: &ParsedLine<'a>) -> Option<ItemBuilder<'a>> {
     let trimmed = line.text.trim();
-    if let Some(separator) = parse_type_separator(trimmed) {
+    if let Some(separator) = parse_return_type_separator(trimmed) {
         return Some(ItemBuilder::new(
             Some(Cow::Borrowed(separator.name)),
             Some(separator.ty),
@@ -940,6 +1018,19 @@ struct TypeSeparator<'a> {
 
 /// Parses a NumPy-style `name : type` separator.
 fn parse_type_separator(line: &str) -> Option<TypeSeparator<'_>> {
+    parse_type_separator_if(line, is_item_name)
+}
+
+fn parse_return_type_separator(line: &str) -> Option<TypeSeparator<'_>> {
+    parse_type_separator_if(line, |name| {
+        is_item_name(name) || is_parenthesized_return_name(name)
+    })
+}
+
+fn parse_type_separator_if(
+    line: &str,
+    is_valid_name: impl FnOnce(&str) -> bool,
+) -> Option<TypeSeparator<'_>> {
     let (name, ty) = split_once_at_top_level_colon(line)?;
     let has_whitespace_before_colon = name.chars().last().is_some_and(char::is_whitespace);
     let has_whitespace_after_colon = ty.chars().next().is_some_and(char::is_whitespace);
@@ -949,7 +1040,7 @@ fn parse_type_separator(line: &str) -> Option<TypeSeparator<'_>> {
 
     let name = name.trim();
     let ty = ty.trim();
-    if !is_item_name(name) {
+    if !is_valid_name(name) {
         return None;
     }
     Some(TypeSeparator {
@@ -957,6 +1048,46 @@ fn parse_type_separator(line: &str) -> Option<TypeSeparator<'_>> {
         ty,
         requires_description_block: !has_whitespace_before_colon,
     })
+}
+
+/// Returns whether `name` is a balanced tuple of valid NumPy item names.
+fn is_parenthesized_return_name(name: &str) -> bool {
+    let Some((prefix, elements)) = split_trailing_parenthesized_group(name) else {
+        return false;
+    };
+    if !prefix.is_empty() {
+        return false;
+    }
+
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut count = 0;
+    for (index, character) in elements.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                let Some(nested_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = nested_depth;
+            }
+            ',' if depth == 0 => {
+                if !is_return_name_element(&elements[start..index]) {
+                    return false;
+                }
+                count += 1;
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    depth == 0 && is_return_name_element(&elements[start..]) && count > 0
+}
+
+fn is_return_name_element(element: &str) -> bool {
+    let element = element.trim();
+    is_item_name_part(element) || is_parenthesized_return_name(element)
 }
 
 fn has_indented_description(line: &NumpyLine<'_>, following_lines: &[NumpyLine<'_>]) -> bool {

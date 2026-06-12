@@ -42,8 +42,7 @@ impl Docstring {
 
     /// Render the docstring for markdown display
     pub fn render_markdown(&self) -> String {
-        let trimmed = documentation_trim(&self.0);
-        markdown::render(&trimmed)
+        markdown::render(&self.0)
     }
 
     /// Extract parameter documentation from popular docstring formats.
@@ -1263,7 +1262,7 @@ Summary.
     }
 
     #[test]
-    fn test_numpy_style_parameter_documentation() {
+    fn renders_and_extracts_numpy_style_docstring() {
         let _snap = bind_docstring_snapshot_filters();
         let docstring = r#"
         This is a function description.
@@ -1272,71 +1271,232 @@ Summary.
         ----------
         param1 : str
             The first parameter description
-        param2 : int
-            The second parameter description
-            This is a continuation of param2 description.
+        param2, param4 : int
+            The shared parameter description
+
+            This is a second paragraph.
+            This is a continuation of the shared description.
         param3
             A parameter without type annotation
+        *args : object
+            Extra positional arguments
+        **kwargs : object
+            Extra keyword arguments
+        options.mode : str
+            Nested field documentation
+        π : int
+            A Unicode parameter
+        a1, a2, ... : sequence of array_like
+            Arrays to combine
+        \*escaped_args : object
+            Escaped positional arguments
+        \**escaped_kwargs : object
+            Escaped keyword arguments
+        override_repr: callable, optional
+            Replacement representation function
+        formats, names :
+        undocumented
+        copy : bool
+            Whether to copy the input
+
+        Other Parameters
+        ----------------
+        kw_only : str, optional
+            A less commonly used keyword-only parameter
 
         Returns
         -------
         str
             The return value description
+
+        Yields
+        ------
+        int
+            The next value
         "#;
 
         let docstring = Docstring::new(docstring.to_owned());
         let param_docs = docstring.parameter_documentation();
 
-        assert_eq!(param_docs.len(), 3);
+        assert_eq!(param_docs.len(), 15);
         assert_eq!(
             param_docs.get("param1").expect("param1 should exist"),
             "The first parameter description"
         );
         assert_eq!(
             param_docs.get("param2").expect("param2 should exist"),
-            "The second parameter description\nThis is a continuation of param2 description."
+            "The shared parameter description\n\nThis is a second paragraph.\nThis is a continuation of the shared description."
+        );
+        assert_eq!(
+            param_docs.get("param4").expect("param4 should exist"),
+            "The shared parameter description\n\nThis is a second paragraph.\nThis is a continuation of the shared description."
         );
         assert_eq!(
             param_docs.get("param3").expect("param3 should exist"),
             "A parameter without type annotation"
         );
-
-        assert_snapshot!(docstring.render_plaintext(), @"
+        assert_eq!(
+            param_docs.get("*args").expect("*args should exist"),
+            "Extra positional arguments"
+        );
+        assert_eq!(
+            param_docs.get("**kwargs").expect("**kwargs should exist"),
+            "Extra keyword arguments"
+        );
+        assert!(!param_docs.contains_key("options"));
+        assert_eq!(
+            param_docs
+                .get("options.mode")
+                .expect("options.mode should exist"),
+            "Nested field documentation"
+        );
+        assert_eq!(
+            param_docs.get("π").expect("π should exist"),
+            "A Unicode parameter"
+        );
+        assert_eq!(
+            param_docs.get("a1").expect("a1 should exist"),
+            "Arrays to combine"
+        );
+        assert_eq!(
+            param_docs.get("a2").expect("a2 should exist"),
+            "Arrays to combine"
+        );
+        assert_eq!(
+            param_docs
+                .get("*escaped_args")
+                .expect("*escaped_args should exist"),
+            "Escaped positional arguments"
+        );
+        assert_eq!(
+            param_docs
+                .get("**escaped_kwargs")
+                .expect("**escaped_kwargs should exist"),
+            "Escaped keyword arguments"
+        );
+        assert_eq!(
+            param_docs
+                .get("override_repr")
+                .expect("override_repr should exist"),
+            "Replacement representation function"
+        );
+        assert_eq!(
+            param_docs.get("copy").expect("copy should exist"),
+            "Whether to copy the input"
+        );
+        assert_eq!(
+            param_docs.get("kw_only").expect("kw_only should exist"),
+            "A less commonly used keyword-only parameter"
+        );
+        assert_snapshot!(docstring.render_plaintext(), @r"
         This is a function description.
 
         Parameters
         ----------
         param1 : str
             The first parameter description
-        param2 : int
-            The second parameter description
-            This is a continuation of param2 description.
+        param2, param4 : int
+            The shared parameter description
+
+            This is a second paragraph.
+            This is a continuation of the shared description.
         param3
             A parameter without type annotation
+        *args : object
+            Extra positional arguments
+        **kwargs : object
+            Extra keyword arguments
+        options.mode : str
+            Nested field documentation
+        π : int
+            A Unicode parameter
+        a1, a2, ... : sequence of array_like
+            Arrays to combine
+        \*escaped_args : object
+            Escaped positional arguments
+        \**escaped_kwargs : object
+            Escaped keyword arguments
+        override_repr: callable, optional
+            Replacement representation function
+        formats, names :
+        undocumented
+        copy : bool
+            Whether to copy the input
+
+        Other Parameters
+        ----------------
+        kw_only : str, optional
+            A less commonly used keyword-only parameter
 
         Returns
         -------
         str
             The return value description
+
+        Yields
+        ------
+        int
+            The next value
         ");
 
-        assert_snapshot!(docstring.render_markdown(), @"
-        This is a function description.<HB>
-        <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation<HB>
-        <HB>
-        Returns<HB>
-        -------<HB>
-        str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The return value description
+        assert_snapshot!(docstring.render_markdown(), @r"
+        This is a function description.
+
+        ## Parameters
+        **param1**: `str`<HB>
+        The first parameter description
+
+        **param2, param4**: `int`<HB>
+        The shared parameter description
+
+        This is a second paragraph.<HB>
+        This is a continuation of the shared description.
+
+        **param3**<HB>
+        A parameter without type annotation
+
+        **\*args**: `object`<HB>
+        Extra positional arguments
+
+        **\*\*kwargs**: `object`<HB>
+        Extra keyword arguments
+
+        **options.mode**: `str`<HB>
+        Nested field documentation
+
+        **π**: `int`<HB>
+        A Unicode parameter
+
+        **a1, a2, ...**: `sequence of array_like`<HB>
+        Arrays to combine
+
+        **\*escaped\_args**: `object`<HB>
+        Escaped positional arguments
+
+        **\*\*escaped\_kwargs**: `object`<HB>
+        Escaped keyword arguments
+
+        **override\_repr**: `callable, optional`<HB>
+        Replacement representation function
+
+        **formats, names**
+
+        **undocumented**
+
+        **copy**: `bool`<HB>
+        Whether to copy the input
+
+        ## Other Parameters
+        **kw\_only**: `str, optional`<HB>
+        A less commonly used keyword-only parameter
+
+        ## Returns
+        `str`<HB>
+        The return value description
+
+        ## Yields
+        `int`<HB>
+        The next value
         ");
     }
 
@@ -1567,10 +1727,9 @@ value : int
         **param2**: `int`<HB>
         Another Google-style parameter
 
-        Parameters<HB>
-        ----------<HB>
-        param3 : bool<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style parameter
+        ## Parameters
+        **param3**: `bool`<HB>
+        NumPy-style parameter
         ");
     }
 
@@ -1731,95 +1890,17 @@ value : int
         **param3**<HB>
         Another reST-style parameter
 
-        Parameters<HB>
-        ----------<HB>
-        param3 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style duplicate parameter<HB>
-        param4 : bool<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style parameter
+        ## Parameters
+        **param3**: `str`<HB>
+        NumPy-style duplicate parameter
+
+        **param4**: `bool`<HB>
+        NumPy-style parameter
         ");
     }
 
     #[test]
-    fn test_numpy_style_with_different_indentation() {
-        let _snap = bind_docstring_snapshot_filters();
-        let docstring = r#"
-        This is a function description.
-
-        Parameters
-        ----------
-        param1 : str
-            The first parameter description
-        param2 : int
-            The second parameter description
-            This is a continuation of param2 description.
-        param3
-            A parameter without type annotation
-
-        Returns
-        -------
-        str
-            The return value description
-        "#;
-
-        let docstring = Docstring::new(docstring.to_owned());
-        let param_docs = docstring.parameter_documentation();
-
-        assert_eq!(param_docs.len(), 3);
-        assert_eq!(
-            param_docs.get("param1").expect("param1 should exist"),
-            "The first parameter description"
-        );
-        assert_eq!(
-            param_docs.get("param2").expect("param2 should exist"),
-            "The second parameter description\nThis is a continuation of param2 description."
-        );
-        assert_eq!(
-            param_docs.get("param3").expect("param3 should exist"),
-            "A parameter without type annotation"
-        );
-
-        assert_snapshot!(docstring.render_plaintext(), @"
-        This is a function description.
-
-        Parameters
-        ----------
-        param1 : str
-            The first parameter description
-        param2 : int
-            The second parameter description
-            This is a continuation of param2 description.
-        param3
-            A parameter without type annotation
-
-        Returns
-        -------
-        str
-            The return value description
-        ");
-
-        assert_snapshot!(docstring.render_markdown(), @"
-        This is a function description.<HB>
-        <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation<HB>
-        <HB>
-        Returns<HB>
-        -------<HB>
-        str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The return value description
-        ");
-    }
-
-    #[test]
-    fn test_numpy_style_with_tabs_and_mixed_indentation() {
+    fn renders_and_extracts_numpy_docstring_with_mixed_indentation() {
         let _snap = bind_docstring_snapshot_filters();
         // Using raw strings to avoid tab/space conversion issues in the test
         let docstring = "
@@ -1868,17 +1949,18 @@ value : int
         ");
 
         assert_snapshot!(docstring.render_markdown(), @"
-        This is a function description.<HB>
-        <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation
+        This is a function description.
+
+        ## Parameters
+        **param1**: `str`<HB>
+        The first parameter description
+
+        **param2**: `int`<HB>
+        The second parameter description<HB>
+        This is a continuation of param2 description.
+
+        **param3**<HB>
+        A parameter without type annotation
         ");
     }
 

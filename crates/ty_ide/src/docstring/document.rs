@@ -2,7 +2,8 @@ use indexmap::IndexMap;
 use strum_macros::EnumIter;
 
 pub(super) mod google;
-mod numpy;
+/// NumPy-style docstring parsing.
+pub(in crate::docstring) mod numpy;
 pub(super) mod preformatted;
 pub(super) mod rst;
 pub(in crate::docstring) mod syntax;
