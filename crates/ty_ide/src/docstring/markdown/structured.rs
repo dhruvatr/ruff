@@ -8,6 +8,7 @@ use crate::docstring::document::SectionKind;
 use crate::docstring::document::preformatted::MarkdownFence;
 use crate::docstring::document::syntax::{is_markdown_code_span, starts_with_markdown_list_item};
 
+mod google;
 mod rst;
 
 /// Renders a docstring as Markdown.
@@ -15,7 +16,9 @@ mod rst;
 /// `source` must have already undergone PEP-257 trimming and universal newline
 /// normalization (typically via `docstring::documentation_trim`).
 pub(super) fn render_into(output: &mut String, source: &str) {
-    render_sections_into(output, source, rst::structured_sections(source));
+    let mut sections = rst::structured_sections(source);
+    sections.extend(google::structured_sections(source));
+    render_sections_into(output, source, sections);
 }
 
 /// Renders a docstring from non-overlapping structured sections and general source fragments.
@@ -187,6 +190,20 @@ impl SectionItem {
             display_name: display_name.map(str::to_string),
             ty: ty.filter(|ty| !ty.is_empty()).map(str::to_string),
             description_source: description_source.into(),
+        }
+    }
+
+    fn from_owned_parts(
+        kind: SectionKind,
+        display_name: Option<String>,
+        ty: Option<String>,
+        description_source: String,
+    ) -> Self {
+        Self {
+            kind,
+            display_name,
+            ty: ty.filter(|ty| !ty.is_empty()),
+            description_source,
         }
     }
 

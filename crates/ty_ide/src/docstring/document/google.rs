@@ -79,6 +79,13 @@ impl Section {
     fn into_parts(self) -> (SectionKind, TextRange, Vec<BodyFragment>) {
         (self.kind, self.range, self.body.fragments)
     }
+
+    /// Consumes this section when it can be rendered structurally.
+    pub(in crate::docstring) fn into_renderable_parts(
+        self,
+    ) -> Option<(SectionKind, TextRange, Vec<BodyFragment>)> {
+        self.body.is_renderable.then(|| self.into_parts())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
