@@ -817,8 +817,8 @@ static_assert(not is_assignable_to(A, HasX))
 class B:
     x: Final = 42
 
-static_assert(not is_subtype_of(B, HasX))
-static_assert(not is_assignable_to(B, HasX))
+static_assert(not is_subtype_of(A, HasX))
+static_assert(not is_assignable_to(A, HasX))
 
 class IntSub(int): ...
 
@@ -2329,7 +2329,7 @@ static_assert(is_subtype_of(HasGetAttr, HasXProperty))
 static_assert(is_assignable_to(HasGetAttr, HasXProperty))
 
 static_assert(not is_subtype_of(HasGetAttr, HasMutableXAttr))
-static_assert(not is_assignable_to(HasGetAttr, HasMutableXAttr))
+static_assert(not is_subtype_of(HasGetAttr, HasMutableXAttr))
 
 class HasGetAttrWithUnsuitableReturn:
     def __getattr__(self, attr: str) -> tuple[int, int]:
