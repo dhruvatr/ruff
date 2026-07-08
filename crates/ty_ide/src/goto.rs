@@ -1318,7 +1318,9 @@ fn definitions_for_expression<'db>(
             alias_resolution,
         )),
         ast::ExprRef::Attribute(attribute) => Some(ty_python_semantic::definitions_for_attribute(
-            model, attribute,
+            model,
+            attribute,
+            alias_resolution,
         )),
         _ => None,
     }

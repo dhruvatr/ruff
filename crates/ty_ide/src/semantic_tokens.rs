@@ -983,7 +983,9 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
                 // Then add token for the attribute name (e.g., 'path' in 'os.path')
                 let classification = self
                     .classify_type_alias_from_resolved_definitions(&definitions_for_attribute(
-                        self.model, attr,
+                        self.model,
+                        attr,
+                        ImportAliasResolution::ResolveAliases,
                     ))
                     .or_else(|| {
                         let ty = static_member_type_for_attribute(self.model, attr).unwrap_or_else(

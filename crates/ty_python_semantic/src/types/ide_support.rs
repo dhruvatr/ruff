@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use crate::FxIndexSet;
 use crate::place::builtins_module_scope;
-use crate::reachability::is_range_reachable;
+use crate::reachability::{binding_reachability, is_range_reachable};
 use crate::types::call::{CallArguments, CallError, MatchedArgument};
 use crate::types::class::{DynamicClassAnchor, DynamicEnumAnchor, DynamicNamedTupleAnchor};
 use crate::types::constraints::ConstraintSetBuilder;
 use crate::types::signatures::{ParametersKind, Signature};
 use crate::types::{
     CallDunderError, CallableTypes, ClassBase, ClassLiteral, ClassType, KnownClass, KnownFunction,
-    KnownUnion, Type, TypeContext,
+    KnownUnion, Type, TypeContext, binding_type,
 };
 use crate::{Db, DisplaySettings, HasDefinition, HasType, SemanticModel};
 use itertools::Either;
@@ -19,8 +19,12 @@ use ruff_db::source::source_text;
 use ruff_python_ast::{self as ast, AnyNodeRef, name::Name};
 use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::FxHashSet;
-use ty_python_core::definition::{Definition, DefinitionKind};
-use ty_python_core::{attribute_scopes, global_scope, semantic_index, use_def_map};
+use ty_python_core::ast_ids::HasScopedUseId;
+use ty_python_core::definition::{Definition, DefinitionKind, DefinitionState};
+use ty_python_core::{
+    BindingWithConstraintsIterator, EnclosingSnapshotResult, PlaceExprRef, UseDefMap,
+    attribute_scopes, global_scope, place_table, semantic_index, use_def_map,
+};
 
 mod unreachable_code;
 #[path = "ide_support/unused_bindings.rs"]
@@ -30,6 +34,113 @@ pub use resolve_definition::{ImportAliasResolution, ResolvedDefinition, map_stub
 use resolve_definition::{find_symbol_in_scope, resolve_definition};
 pub use unreachable_code::{UnreachableKind, UnreachableRange, unreachable_ranges};
 pub use unused_binding_support::{UnusedBinding, unused_bindings};
+
+impl<'db> SemanticModel<'db> {
+    /// Returns source bindings at a name use, with fallbacks for annotations and lazy locals.
+    pub fn name_use_bindings(&self, name: &ast::ExprName) -> Option<SourceBindings<'db>> {
+        let scope = self.scope(name.into())?;
+        let index = semantic_index(self.db(), self.file());
+        let table = index.place_table(scope);
+        let symbol_id = table.symbol_id(name.id.as_str())?;
+        let symbol = table.symbol(symbol_id);
+        let use_def = index.use_def_map(scope);
+        let collect = |bindings| source_bindings(self.db(), use_def, bindings);
+        if self.is_in_string_annotation() && (symbol.is_local() || scope.is_global()) {
+            return collect(use_def.reachable_symbol_bindings(symbol_id));
+        }
+        if !self.is_in_string_annotation() {
+            let bindings =
+                collect(use_def.bindings_at_use(name.scoped_use_id(self.db(), self.file())))?;
+            if !bindings.definitions.is_empty() || bindings.may_be_deleted {
+                return Some(bindings);
+            }
+            let kind = index.scope(scope).kind();
+            if symbol.is_local() {
+                return if kind.is_class() || scope.is_global() {
+                    Some(bindings)
+                } else {
+                    collect(use_def.reachable_symbol_bindings(symbol_id))
+                };
+            }
+        }
+
+        for (ancestor, _) in index.visible_ancestor_scopes(scope).skip(1) {
+            let table = index.place_table(ancestor);
+            let Some(symbol_id) = table.symbol_id(name.id.as_str()) else {
+                continue;
+            };
+            let symbol = table.symbol(symbol_id);
+            if symbol.is_nonlocal() || !symbol.is_local() && !ancestor.is_global() {
+                continue;
+            }
+            let use_def = index.use_def_map(ancestor);
+            let bindings =
+                match index.enclosing_snapshot(ancestor, PlaceExprRef::Symbol(symbol), scope) {
+                    EnclosingSnapshotResult::FoundBindings(bindings) => bindings,
+                    _ => use_def.reachable_symbol_bindings(symbol_id),
+                };
+            return source_bindings(self.db(), use_def, bindings);
+        }
+        Some(SourceBindings::default())
+    }
+
+    /// Returns the source bindings that define a module attribute at the end of its module.
+    pub fn module_attribute_bindings(
+        &self,
+        attribute: &ast::ExprAttribute,
+    ) -> Option<SourceBindings<'db>> {
+        let Type::ModuleLiteral(module) = attribute.value.inferred_type(self)? else {
+            return None;
+        };
+        let file = module.module(self.db()).file(self.db())?;
+        let scope = global_scope(self.db(), file);
+        let symbol = place_table(self.db(), scope).symbol_id(attribute.attr.as_str())?;
+        let use_def = use_def_map(self.db(), scope);
+        source_bindings(
+            self.db(),
+            use_def,
+            use_def.end_of_scope_symbol_bindings(symbol),
+        )
+    }
+
+    /// Returns the inferred type supplied by a source binding.
+    pub fn source_binding_type(&self, definition: Definition<'db>) -> Type<'db> {
+        binding_type(self.db(), definition)
+    }
+}
+
+/// Source bindings available to one semantic lookup.
+#[derive(Default)]
+pub struct SourceBindings<'db> {
+    /// User-visible source definitions that can reach the use.
+    pub definitions: Box<[Definition<'db>]>,
+    /// Whether a deleted path can also reach the use.
+    pub may_be_deleted: bool,
+}
+
+fn source_bindings<'db>(
+    db: &'db dyn Db,
+    use_def: &'db UseDefMap<'db>,
+    bindings: BindingWithConstraintsIterator<'_, 'db>,
+) -> Option<SourceBindings<'db>> {
+    let mut result = SourceBindings::default();
+    let mut definitions = Vec::new();
+    for binding in bindings {
+        if binding_reachability(db, use_def, &binding).is_always_false() {
+            continue;
+        }
+        match binding.binding {
+            DefinitionState::Defined(definition) => {
+                definition.kind(db).is_user_visible().then_some(())?;
+                definitions.push(definition);
+            }
+            DefinitionState::Deleted => result.may_be_deleted = true,
+            DefinitionState::Undefined => {}
+        }
+    }
+    result.definitions = definitions.into_boxed_slice();
+    Some(result)
+}
 
 /// Get the primary definition kind for a name expression within a specific file.
 /// Returns the first definition kind that is reachable for this name in its scope.
@@ -210,6 +321,7 @@ pub fn definitions_for_name<'db>(
 pub fn definitions_for_attribute<'db>(
     model: &SemanticModel<'db>,
     attribute: &ast::ExprAttribute,
+    alias_resolution: ImportAliasResolution,
 ) -> Vec<ResolvedDefinition<'db>> {
     let db = model.db();
     let name_str = attribute.attr.as_str();
@@ -245,7 +357,7 @@ pub fn definitions_for_attribute<'db>(
                         db,
                         def,
                         Some(name_str),
-                        ImportAliasResolution::ResolveAliases,
+                        alias_resolution,
                     ));
                 }
             }
