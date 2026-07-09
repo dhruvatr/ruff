@@ -486,6 +486,21 @@ def forwarded[T](x: T, cond: bool) -> T | list[T]:
     return x if cond else [x]
 ```
 
+## Generic calls with non-inferable return contexts
+
+A return context that contains no concrete type information does not influence the specialization:
+
+```py
+from typing import overload
+
+@overload
+def f[A, B](x: tuple[A, B]) -> list[A]: ...
+@overload
+def f[A, B, C](x: tuple[A, B, C]) -> list[A]: ...
+def f[A, B, C](x: tuple[A, B] | tuple[A, B, C]) -> list[A | B | C]:
+    return f(x)  # error: [invalid-return-type]
+```
+
 ## Generic constructors
 
 The same applies to constructors of generic classes:
@@ -715,12 +730,13 @@ def _():
 
 ## Prefer the declared type of generic classes and callables
 
-When inferring a generic call, we only use the declared type as type context if it is in
-non-covariant position. The final annotated assignment binding still uses the declared type if the
-inferred and declared types are mutually assignable:
+Return-context constraints respect variance. A covariant context does not widen a lower bound
+inferred from arguments, but it can narrow an upper-bound-only inference. The final annotated
+assignment binding still uses the declared type if the inferred and declared types are mutually
+assignable:
 
 ```py
-from typing import Any
+from typing import Any, Callable
 
 class Bivariant[T]:
     pass
@@ -777,6 +793,23 @@ reveal_type(x9)  # revealed: Bivariant[Any]
 reveal_type(x10)  # revealed: Covariant[Any]
 reveal_type(x11)  # revealed: Contravariant[Any]
 reveal_type(x12)  # revealed: Invariant[Any]
+
+# The argument only provides an upper bound of `object` for `T`. Conjoining that constraint with
+# the covariant return context narrows the upper bound to `int`.
+def f[T](callback: Callable[[T], None]) -> Covariant[T]:
+    raise NotImplementedError
+
+def accepts_object(_: object) -> None: ...
+
+x13: Covariant[int] = f(accepts_object)
+reveal_type(x13)  # revealed: Covariant[int]
+
+# The argument and return context both provide lower bounds for `T`, so they are combined.
+def make_callable[T](x: T) -> Callable[[T], bool]:
+    raise NotImplementedError
+
+def _(a: int | None):
+    x14: Callable[[str], bool] = make_callable(a)
 ```
 
 This behavior also applies to invariant collection types:
@@ -1173,7 +1206,7 @@ x2: list[A | bool] = [{"bar": 1}, 1]
 However, the declared type should be ignored if the specialization is not solvable:
 
 ```py
-from typing import Any, Callable
+from typing import Callable
 
 def g[T](x: list[T]) -> T:
     return x[0]
@@ -1185,12 +1218,12 @@ def _(a: int | None):
     # error: [invalid-assignment] "Object of type `int | None` is not assignable to `str`"
     x2: str = g(f(a))
 
-def make_callable[T](x: T) -> Callable[[T], bool]:
+def make_identity_callable[T](x: T) -> Callable[[T], T]:
     raise NotImplementedError
 
 def _(a: int | None):
-    # error: [invalid-assignment] "Object of type `(int | None, /) -> bool` is not assignable to `(str, /) -> bool`"
-    x1: Callable[[str], bool] = make_callable(a)
+    # error: [invalid-assignment] "Object of type `(int | None, /) -> int | None` is not assignable to `(str, /) -> str`"
+    x3: Callable[[str], str] = make_identity_callable(a)
 ```
 
 ## Instance attributes
