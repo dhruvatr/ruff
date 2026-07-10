@@ -5150,3 +5150,16 @@ fn preview_default_rules() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn ruff_toml_is_linted() -> Result<()> {
+    let test = CliTest::with_file("ruff.toml", r#"lint.select = ["F401"]"#)?;
+
+    assert_cmd_snapshot!(
+        test.check_command()
+        .args(["--isolated", "--preview", "--select", "RUF201", "ruff.toml"]),
+        @"",
+    );
+
+    Ok(())
+}

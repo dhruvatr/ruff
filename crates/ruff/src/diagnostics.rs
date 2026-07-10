@@ -213,7 +213,7 @@ pub(crate) fn lint_path(
     debug!("Checking: {}", path.display());
 
     let source_type = match settings.extension.get_source_type(path) {
-        SourceType::Toml(TomlSourceType::Pyproject) => {
+        SourceType::Toml(source_type @ (TomlSourceType::Pyproject | TomlSourceType::Ruff)) => {
             let diagnostics = if settings
                 .rules
                 .iter_enabled()
@@ -226,7 +226,7 @@ pub(crate) fn lint_path(
                     }
                 };
                 let source_file = SourceFileBuilder::new(path.to_string_lossy(), contents).finish();
-                lint_pyproject_toml(&source_file, settings)
+                lint_pyproject_toml(&source_file, settings, source_type)
             } else {
                 vec![]
             };
@@ -359,7 +359,7 @@ pub(crate) fn lint_stdin(
         .map(|path| settings.linter.extension.get_source_type(path))
         .unwrap_or_default()
     {
-        SourceType::Toml(source_type) if source_type.is_pyproject() => {
+        SourceType::Toml(source_type @ (TomlSourceType::Pyproject | TomlSourceType::Ruff)) => {
             if !settings
                 .linter
                 .rules
@@ -379,7 +379,7 @@ pub(crate) fn lint_stdin(
             }
 
             return Ok(Diagnostics {
-                inner: lint_pyproject_toml(&source_file, &settings.linter),
+                inner: lint_pyproject_toml(&source_file, &settings.linter, source_type),
                 fixed: FixMap::from_iter([(fs::relativize_path(path), FixTable::default())]),
                 notebook_indexes: FxHashMap::default(),
             });
