@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::ops::Range;
+use std::path::Path;
 
 use colored::Colorize;
 use log::warn;
@@ -12,7 +13,7 @@ use ruff_source_file::{SourceFile, SourceFileBuilder};
 
 use crate::Locator;
 use crate::fix::{FixResult, fix_file};
-use crate::linter::FixTable;
+use crate::linter::{FixTable, MAX_ITERATIONS, report_failed_to_converge_error};
 use crate::registry::Rule;
 use crate::rules::ruff::rules::{InvalidPyprojectToml, rule_codes_in_selectors};
 use crate::settings::LinterSettings;
@@ -60,29 +61,53 @@ pub fn lint_toml(
     messages
 }
 
-/// Generate diagnostics for a TOML configuration file, apply all available fixes once, and lint
-/// the transformed source.
+/// Generate diagnostics for a TOML configuration file, iteratively applying fixes until the source
+/// stabilizes.
 pub fn lint_fix_toml<'a>(
     source_file: &'a SourceFile,
     settings: &LinterSettings,
     source_type: TomlSourceType,
     unsafe_fixes: UnsafeFixes,
 ) -> TomlFixerResult<'a> {
-    let diagnostics = lint_toml(source_file, settings, source_type);
-    let locator = Locator::new(source_file.source_text());
-    let Some(FixResult { code, fixes, .. }) = fix_file(&diagnostics, &locator, unsafe_fixes) else {
-        return TomlFixerResult {
-            diagnostics,
-            transformed: Cow::Borrowed(source_file.source_text()),
-            fixed: FixTable::default(),
-        };
-    };
+    let mut diagnostics = lint_toml(source_file, settings, source_type);
+    let mut transformed = Cow::Borrowed(source_file.source_text());
+    let mut fixed = FixTable::default();
+    let mut iterations = 0;
 
-    let transformed_source = SourceFileBuilder::new(source_file.name(), code.as_str()).finish();
-    TomlFixerResult {
-        diagnostics: lint_toml(&transformed_source, settings, source_type),
-        transformed: Cow::Owned(code),
-        fixed: fixes,
+    loop {
+        let locator = Locator::new(transformed.as_ref());
+        let Some(FixResult { code, fixes, .. }) = fix_file(&diagnostics, &locator, unsafe_fixes)
+        else {
+            return TomlFixerResult {
+                diagnostics,
+                transformed,
+                fixed,
+            };
+        };
+
+        if iterations >= MAX_ITERATIONS {
+            report_failed_to_converge_error(
+                Path::new(source_file.name()),
+                transformed.as_ref(),
+                &diagnostics,
+            );
+            return TomlFixerResult {
+                diagnostics,
+                transformed,
+                fixed,
+            };
+        }
+
+        for (rule, name, count) in fixes.iter() {
+            *fixed.entry(rule).or_default(name) += count;
+        }
+
+        transformed = Cow::Owned(code);
+        iterations += 1;
+
+        let transformed_source =
+            SourceFileBuilder::new(source_file.name(), transformed.as_ref()).finish();
+        diagnostics = lint_toml(&transformed_source, settings, source_type);
     }
 }
 
@@ -121,6 +146,9 @@ pub(crate) fn text_range_from_std(
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+
+    use ruff_db::diagnostic::{DisplayDiagnosticConfig, DisplayDiagnostics, DummyFileResolver};
     use ruff_python_ast::TomlSourceType;
     use ruff_source_file::SourceFileBuilder;
 
@@ -131,7 +159,7 @@ mod tests {
     use super::lint_fix_toml;
 
     #[test]
-    fn fixes_toml_once() {
+    fn fixes_toml() {
         let source_file = SourceFileBuilder::new("ruff.toml", r#"lint.select = ["F401"]"#).finish();
         let settings = LinterSettings::for_rule(Rule::RuleCodesInSelectors).with_preview_mode();
 
@@ -142,8 +170,43 @@ mod tests {
             UnsafeFixes::Disabled,
         );
 
-        assert_eq!(result.transformed, r#"lint.select = ["unused-import"]"#);
-        assert!(result.diagnostics.is_empty());
-        assert_eq!(result.fixed.counts().sum::<usize>(), 1);
+        let result = std::fmt::from_fn(|f| {
+            let count = result.fixed.counts().sum::<usize>();
+            writeln!(
+                f,
+                "Applied {count} fix{es}",
+                es = if count != 1 { "es" } else { "" }
+            )?;
+            writeln!(
+                f,
+                "\n## Transformed output\n\n```toml\n{}\n```",
+                result.transformed
+            )?;
+            if !result.diagnostics.is_empty() {
+                writeln!(
+                    f,
+                    "\n## Remaining diagnostics\n\n{}",
+                    DisplayDiagnostics::new(
+                        &DummyFileResolver,
+                        &DisplayDiagnosticConfig::new("ruff"),
+                        &result.diagnostics
+                    )
+                )?;
+            }
+            Ok(())
+        });
+
+        assert_snapshot!(
+            result,
+            @r#"
+        Applied 1 fix
+
+        ## Transformed output
+
+        ```toml
+        lint.select = ["unused-import"]
+        ```
+        "#,
+        );
     }
 }
