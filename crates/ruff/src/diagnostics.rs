@@ -14,7 +14,7 @@ use ruff_db::diagnostic::Diagnostic;
 use ruff_linter::codes::Rule;
 use ruff_linter::linter::{FixTable, FixerResult, LinterResult, ParseSource, lint_fix, lint_only};
 use ruff_linter::package::PackageRoot;
-use ruff_linter::pyproject_toml::lint_pyproject_toml;
+use ruff_linter::pyproject_toml::lint_toml;
 use ruff_linter::settings::types::UnsafeFixes;
 use ruff_linter::settings::{LinterSettings, flags};
 use ruff_linter::source_kind::{SourceError, SourceKind};
@@ -226,7 +226,7 @@ pub(crate) fn lint_path(
                     }
                 };
                 let source_file = SourceFileBuilder::new(path.to_string_lossy(), contents).finish();
-                lint_pyproject_toml(&source_file, settings, source_type)
+                lint_toml(&source_file, settings, source_type)
             } else {
                 vec![]
             };
@@ -379,7 +379,7 @@ pub(crate) fn lint_stdin(
             }
 
             return Ok(Diagnostics {
-                inner: lint_pyproject_toml(&source_file, &settings.linter, source_type),
+                inner: lint_toml(&source_file, &settings.linter, source_type),
                 fixed: FixMap::from_iter([(fs::relativize_path(path), FixTable::default())]),
                 notebook_indexes: FxHashMap::default(),
             });

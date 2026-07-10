@@ -15,7 +15,7 @@ use crate::settings::LinterSettings;
 use crate::{IOError, Violation};
 
 /// RUF200
-pub fn lint_pyproject_toml(
+pub fn lint_toml(
     source_file: &SourceFile,
     settings: &LinterSettings,
     source_type: TomlSourceType,
