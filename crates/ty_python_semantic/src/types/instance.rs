@@ -326,21 +326,6 @@ impl<'db> NominalInstanceType<'db> {
         }
     }
 
-    /// Returns whether this instance's type structure may contain a `Self` type variable.
-    pub(super) fn may_contain_self(self, db: &'db dyn Db) -> bool {
-        match self.0 {
-            NominalInstanceInner::ExactTuple(_) => true,
-            NominalInstanceInner::SysVersionInfo | NominalInstanceInner::Object => false,
-            NominalInstanceInner::NonTuple(class) => match class.class(db) {
-                ClassType::Generic(_) => true,
-                ClassType::NonGeneric(ClassLiteral::Static(class)) => class.known(db).is_none(),
-                // Dynamic and functional classes can retain an enclosing `Self` in their members or fields,
-                // so only known, non-generic classes are treated as definitely free of `Self`.
-                ClassType::NonGeneric(_) => true,
-            },
-        }
-    }
-
     /// If this type is an *exact* tuple type (*not* a subclass of `tuple`), returns the
     /// tuple spec.
     ///
