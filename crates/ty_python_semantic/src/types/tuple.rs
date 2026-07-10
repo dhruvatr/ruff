@@ -29,7 +29,7 @@ use crate::subscript::{
 use crate::types::class::{ClassType, KnownClass};
 use crate::types::constraints::{ConstraintSet, IteratorConstraintsExtension};
 use crate::types::relation::{DisjointnessChecker, TypeRelationChecker};
-use crate::types::set_theoretic::RecursivelyDefined;
+use crate::types::set_theoretic::{RecursivelyDefined, UnionNormalization};
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, ErrorContext, FindLegacyTypeVarsVisitor,
     IntersectionType, Type, TypeContext, TypeMapping, UnionBuilder, UnionType,
@@ -2035,7 +2035,16 @@ impl<T> Tuple<T> {
 
 impl<'db> Tuple<Type<'db>> {
     pub(crate) fn homogeneous_element_type(&self, db: &'db dyn Db) -> Type<'db> {
-        UnionType::from_elements_leave_aliases(db, self.all_elements())
+        self.all_elements()
+            .iter()
+            .copied()
+            .fold(
+                UnionBuilder::new(db)
+                    .unpack_aliases(false)
+                    .normalization(UnionNormalization::Structural),
+                UnionBuilder::add,
+            )
+            .build()
     }
 
     /// Returns the type of a static slice into this tuple.
