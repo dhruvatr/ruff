@@ -468,7 +468,6 @@ ignore = ["D203", "D212"]
     All checks passed!
 
     ----- stderr -----
-    warning: No Python files found under the given path(s)
     ");
 
     Ok(())
@@ -5163,7 +5162,6 @@ fn ruff_toml_is_linted() -> Result<()> {
             "--preview",
             "--select",
             "RUF201",
-            "ruff.toml",
         ]),
         @r#"
     success: false

@@ -34,24 +34,24 @@ pub fn lint_toml(
 ) -> Vec<Diagnostic> {
     let mut messages = rule_codes_in_selectors(source_file, settings, source_type);
 
-    let Some(err) = toml::from_str::<PyProjectToml>(source_file.source_text()).err() else {
-        return messages;
-    };
+    if settings.rules.enabled(Rule::InvalidPyprojectToml) && source_type.is_pyproject() {
+        let Some(err) = toml::from_str::<PyProjectToml>(source_file.source_text()).err() else {
+            return messages;
+        };
 
-    let range = match err.span() {
-        // This is bad but sometimes toml and/or serde just don't give us spans
-        // TODO(konstin,micha): https://github.com/astral-sh/ruff/issues/4571
-        None => TextRange::default(),
-        Some(range) => {
-            let Some(range) = text_range_from_std(range, source_file, settings, &mut messages)
-            else {
-                return messages;
-            };
-            range
-        }
-    };
+        let range = match err.span() {
+            // This is bad but sometimes toml and/or serde just don't give us spans
+            // TODO(konstin,micha): https://github.com/astral-sh/ruff/issues/4571
+            None => TextRange::default(),
+            Some(range) => {
+                let Some(range) = text_range_from_std(range, source_file, settings, &mut messages)
+                else {
+                    return messages;
+                };
+                range
+            }
+        };
 
-    if settings.rules.enabled(Rule::InvalidPyprojectToml) {
         let toml_err = err.message().to_string();
         let diagnostic =
             InvalidPyprojectToml { message: toml_err }.into_diagnostic(range, source_file);
