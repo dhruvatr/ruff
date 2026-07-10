@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ops::{Rem, Sub};
 
 use ruff_source_file::LineRanges;
 use ruff_text_size::{TextRange, TextSize};
@@ -17,7 +18,7 @@ pub fn expand_tabs(source: &str) -> Cow<'_, str> {
     for character in source.chars() {
         match character {
             '\t' => {
-                let spaces = TAB_SIZE - column % TAB_SIZE;
+                let spaces = tab_offset(column, TAB_SIZE);
                 expanded.extend(std::iter::repeat_n(' ', spaces));
                 column += spaces;
             }
@@ -33,6 +34,14 @@ pub fn expand_tabs(source: &str) -> Cow<'_, str> {
     }
 
     Cow::Owned(expanded)
+}
+
+/// Returns the number of columns from `column` to the next tab stop.
+pub fn tab_offset<T>(column: T, tab_size: T) -> T
+where
+    T: Copy + Rem<Output = T> + Sub<Output = T>,
+{
+    tab_size - column % tab_size
 }
 
 /// Extract the leading indentation from a line.
@@ -117,7 +126,7 @@ impl PythonWhitespace for str {
 mod tests {
     use std::borrow::Cow;
 
-    use super::expand_tabs;
+    use super::{expand_tabs, tab_offset};
 
     #[test]
     fn tab_expansion_borrows_unchanged_text() {
@@ -130,5 +139,12 @@ mod tests {
 
         assert!(matches!(&expanded, Cow::Owned(_)));
         assert_eq!(expanded, "        value");
+    }
+
+    #[test]
+    fn tab_offset_advances_to_next_stop() {
+        assert_eq!(tab_offset(0, 8), 8);
+        assert_eq!(tab_offset(2, 8), 6);
+        assert_eq!(tab_offset(8, 8), 8);
     }
 }
