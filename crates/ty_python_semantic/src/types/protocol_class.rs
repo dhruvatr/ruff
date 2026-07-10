@@ -1066,7 +1066,7 @@ fn descriptor_setter_write_type<'db>(
     descriptor_ty: Type<'db>,
     receiver_ty: Type<'db>,
 ) -> Option<Type<'db>> {
-    let write_ty = match descriptor_ty {
+    match descriptor_ty {
         Type::Union(union) => {
             let write_types = union
                 .elements(db)
@@ -1075,11 +1075,10 @@ fn descriptor_setter_write_type<'db>(
                     descriptor_setter_write_type_for_alternative(db, *descriptor_ty, receiver_ty)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            IntersectionType::bounded_from_elements(db, write_types)?
+            IntersectionType::bounded_from_elements(db, write_types)
         }
-        _ => descriptor_setter_write_type_for_alternative(db, descriptor_ty, receiver_ty)?,
-    };
-    (!write_ty.is_never()).then_some(write_ty)
+        _ => descriptor_setter_write_type_for_alternative(db, descriptor_ty, receiver_ty),
+    }
 }
 
 /// Derive the values accepted by one possible runtime descriptor.
@@ -1103,22 +1102,22 @@ fn descriptor_setter_write_type_for_alternative<'db>(
     let write_types = callables
         .iter()
         .map(|callable| {
-            let write_ty = UnionType::from_elements(
-                db,
-                callable.signatures(db).iter().filter_map(|signature| {
+            let write_types = callable
+                .signatures(db)
+                .iter()
+                .filter_map(|signature| {
                     descriptor_setter_signature_write_type(
                         db,
                         signature,
                         descriptor_ty,
                         receiver_ty,
                     )
-                }),
-            );
-            (!write_ty.is_never()).then_some(write_ty)
+                })
+                .collect::<Vec<_>>();
+            (!write_types.is_empty()).then(|| UnionType::from_elements(db, write_types))
         })
         .collect::<Option<Vec<_>>>()?;
-    let write_ty = IntersectionType::bounded_from_elements(db, write_types)?;
-    (!write_ty.is_never()).then_some(write_ty)
+    IntersectionType::bounded_from_elements(db, write_types)
 }
 
 /// Derive the values accepted by one applicable `__set__` overload.
