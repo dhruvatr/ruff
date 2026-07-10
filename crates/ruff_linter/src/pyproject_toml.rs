@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 
 use colored::Colorize;
@@ -7,12 +8,22 @@ use ruff_python_ast::TomlSourceType;
 use ruff_text_size::{TextRange, TextSize};
 
 use ruff_db::diagnostic::Diagnostic;
-use ruff_source_file::SourceFile;
+use ruff_source_file::{SourceFile, SourceFileBuilder};
 
+use crate::Locator;
+use crate::fix::{FixResult, fix_file};
+use crate::linter::FixTable;
 use crate::registry::Rule;
 use crate::rules::ruff::rules::{InvalidPyprojectToml, rule_codes_in_selectors};
 use crate::settings::LinterSettings;
+use crate::settings::types::UnsafeFixes;
 use crate::{IOError, Violation};
+
+pub struct TomlFixerResult<'a> {
+    pub diagnostics: Vec<Diagnostic>,
+    pub transformed: Cow<'a, str>,
+    pub fixed: FixTable,
+}
 
 /// RUF200
 pub fn lint_toml(
@@ -49,6 +60,32 @@ pub fn lint_toml(
     messages
 }
 
+/// Generate diagnostics for a TOML configuration file, apply all available fixes once, and lint
+/// the transformed source.
+pub fn lint_fix_toml<'a>(
+    source_file: &'a SourceFile,
+    settings: &LinterSettings,
+    source_type: TomlSourceType,
+    unsafe_fixes: UnsafeFixes,
+) -> TomlFixerResult<'a> {
+    let diagnostics = lint_toml(source_file, settings, source_type);
+    let locator = Locator::new(source_file.source_text());
+    let Some(FixResult { code, fixes, .. }) = fix_file(&diagnostics, &locator, unsafe_fixes) else {
+        return TomlFixerResult {
+            diagnostics,
+            transformed: Cow::Borrowed(source_file.source_text()),
+            fixed: FixTable::default(),
+        };
+    };
+
+    let transformed_source = SourceFileBuilder::new(source_file.name(), code.as_str()).finish();
+    TomlFixerResult {
+        diagnostics: lint_toml(&transformed_source, settings, source_type),
+        transformed: Cow::Owned(code),
+        fixed: fixes,
+    }
+}
+
 /// Try to convert a `range` into a `TextRange`, emitting an `IOError` diagnostic if the file is too
 /// large or a warning if the `IOError` lint rule is disabled.
 pub(crate) fn text_range_from_std(
@@ -80,4 +117,33 @@ pub(crate) fn text_range_from_std(
         TextSize::try_from(range.start).unwrap(),
         end,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use ruff_python_ast::TomlSourceType;
+    use ruff_source_file::SourceFileBuilder;
+
+    use crate::codes::Rule;
+    use crate::settings::LinterSettings;
+    use crate::settings::types::UnsafeFixes;
+
+    use super::lint_fix_toml;
+
+    #[test]
+    fn fixes_toml_once() {
+        let source_file = SourceFileBuilder::new("ruff.toml", r#"lint.select = ["F401"]"#).finish();
+        let settings = LinterSettings::for_rule(Rule::RuleCodesInSelectors).with_preview_mode();
+
+        let result = lint_fix_toml(
+            &source_file,
+            &settings,
+            TomlSourceType::Ruff,
+            UnsafeFixes::Disabled,
+        );
+
+        assert_eq!(result.transformed, r#"lint.select = ["unused-import"]"#);
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.fixed.counts().sum::<usize>(), 1);
+    }
 }

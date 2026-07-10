@@ -16,6 +16,8 @@ use ruff_notebook::Notebook;
 #[cfg(test)]
 use ruff_notebook::NotebookError;
 use ruff_python_ast::PySourceType;
+#[cfg(test)]
+use ruff_python_ast::TomlSourceType;
 use ruff_python_codegen::Stylist;
 use ruff_python_index::Indexer;
 use ruff_python_parser::ParseError;

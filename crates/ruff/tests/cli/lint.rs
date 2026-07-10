@@ -5156,9 +5156,36 @@ fn ruff_toml_is_linted() -> Result<()> {
     let test = CliTest::with_file("ruff.toml", r#"lint.select = ["F401"]"#)?;
 
     assert_cmd_snapshot!(
-        test.check_command()
-        .args(["--isolated", "--preview", "--select", "RUF201", "ruff.toml"]),
-        @"",
+        test.command().args([
+            "check",
+            "--no-cache",
+            "--isolated",
+            "--preview",
+            "--select",
+            "RUF201",
+            "ruff.toml",
+        ]),
+        @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    rule-codes-in-selectors: [*] Rule code used instead of name in lint.select
+     --> ruff.toml:1:17
+      |
+    1 | lint.select = ["F401"]
+      |                 ^^^^
+      |
+    help: Replace rule code with name
+      |
+      - lint.select = ["F401"]
+    1 + lint.select = ["unused-import"]
+      |
+
+    Found 1 error.
+    [*] 1 fixable with the `--fix` option.
+
+    ----- stderr -----
+    "#,
     );
 
     Ok(())
