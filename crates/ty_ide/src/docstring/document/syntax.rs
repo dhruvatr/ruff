@@ -106,100 +106,153 @@ fn is_rest_directive_marker(line: &str) -> bool {
     !name.is_empty() && !name.chars().any(char::is_whitespace)
 }
 
-/// Splits the input once at the first colon outside bracket pairs and quoted strings.
-pub(super) fn split_once_unbracketed_colon(line: &str) -> Option<(&str, &str)> {
-    let mut depths = [0usize; 3];
-    let mut quote = None;
-    let mut escaped = false;
+/// Splits at the first top-level colon, ignoring colons inside brackets, quoted strings, and
+/// Markdown code spans.
+///
+/// If square or curly brackets are unclosed, falls back to the first colon outside parentheses.
+/// This preserves item parsing for malformed type annotations.
+pub(super) fn split_once_at_top_level_colon(line: &str) -> Option<(&str, &str)> {
+    let mut nesting = BracketNesting::default();
     let mut fallback_colon = None;
+    let mut index = 0;
 
-    for (index, character) in line.char_indices() {
-        if let Some(quote_character) = quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote_character {
-                quote = None;
-            }
-            continue;
-        }
-
+    while index < line.len() {
+        let character = line[index..].chars().next()?;
         match character {
-            '\'' | '"' => quote = Some(character),
-            '(' => depths[0] += 1,
-            ')' => depths[0] = depths[0].saturating_sub(1),
-            '[' => depths[1] += 1,
-            ']' => depths[1] = depths[1].saturating_sub(1),
-            '{' => depths[2] += 1,
-            '}' => depths[2] = depths[2].saturating_sub(1),
-            ':' if depths == [0; 3] => {
-                return Some((&line[..index], &line[index + character.len_utf8()..]));
+            '\'' | '"' => {
+                index = quoted_string_end(line, index, character);
+                continue;
             }
-            // Retain a colon outside parentheses as a fallback. This recovers an item delimiter
-            // after malformed square or curly brackets while preferring a fully balanced split.
-            ':' if depths[0] == 0 && fallback_colon.is_none() => fallback_colon = Some(index),
+            '`' => {
+                index = code_span_end(line, index);
+                continue;
+            }
+            ':' if nesting.is_top_level() => return Some(split_at_colon(line, index)),
+            ':' if nesting.is_outside_parentheses() => {
+                fallback_colon.get_or_insert(index);
+            }
+            _ => nesting.update(character),
+        }
+        index += character.len_utf8();
+    }
+
+    fallback_colon.map(|index| split_at_colon(line, index))
+}
+
+#[derive(Default)]
+struct BracketNesting {
+    parentheses: usize,
+    square: usize,
+    curly: usize,
+}
+
+impl BracketNesting {
+    fn is_top_level(&self) -> bool {
+        self.parentheses == 0 && self.square == 0 && self.curly == 0
+    }
+
+    fn is_outside_parentheses(&self) -> bool {
+        self.parentheses == 0
+    }
+
+    /// Updates the nesting depth while tolerating unmatched closing brackets.
+    fn update(&mut self, character: char) {
+        match character {
+            '(' => self.parentheses += 1,
+            ')' => self.parentheses = self.parentheses.saturating_sub(1),
+            '[' => self.square += 1,
+            ']' => self.square = self.square.saturating_sub(1),
+            '{' => self.curly += 1,
+            '}' => self.curly = self.curly.saturating_sub(1),
             _ => {}
         }
     }
-
-    fallback_colon.map(|index| (&line[..index], &line[index + ':'.len_utf8()..]))
 }
 
-/// Splits a trailing parenthesized type from a parameter display name.
-pub(super) fn parse_parenthesized_type(name: &str) -> (&str, Option<&str>) {
-    if !name.ends_with(')') {
-        return (name, None);
+fn quoted_string_end(source: &str, start: usize, quote: char) -> usize {
+    let content_start = start + quote.len_utf8();
+    let mut escaped = false;
+    for (offset, character) in source[content_start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return content_start + offset + character.len_utf8();
+        }
+    }
+    source.len()
+}
+
+fn code_span_end(source: &str, start: usize) -> usize {
+    let delimiter_len = source[start..]
+        .bytes()
+        .take_while(|byte| *byte == b'`')
+        .count();
+    let mut index = start + delimiter_len;
+    while index < source.len() {
+        if source.as_bytes()[index] == b'`' {
+            let closing_len = source[index..]
+                .bytes()
+                .take_while(|byte| *byte == b'`')
+                .count();
+            index += closing_len;
+            if closing_len == delimiter_len {
+                return index;
+            }
+        } else {
+            let Some(character) = source[index..].chars().next() else {
+                return source.len();
+            };
+            index += character.len_utf8();
+        }
+    }
+    source.len()
+}
+
+fn split_at_colon(line: &str, index: usize) -> (&str, &str) {
+    (&line[..index], &line[index + ':'.len_utf8()..])
+}
+
+/// Splits the prefix and contents of a balanced trailing parenthesized group.
+///
+/// Parentheses inside quoted strings do not affect nesting.
+pub(super) fn split_trailing_parenthesized_group(value: &str) -> Option<(&str, &str)> {
+    if !value.ends_with(')') {
+        return None;
     }
 
     let mut depth = 0usize;
-    let mut opening = None;
-    let mut quote = None;
-    let mut escaped = false;
+    let mut outermost_opening = None;
+    let mut index = 0;
 
-    for (index, character) in name.char_indices() {
-        if let Some(quote_character) = quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote_character {
-                quote = None;
-            }
-            continue;
-        }
-
+    while index < value.len() {
+        let character = value[index..].chars().next()?;
         match character {
-            '\'' | '"' => quote = Some(character),
+            '\'' | '"' => {
+                index = quoted_string_end(value, index, character);
+                continue;
+            }
             '(' => {
                 if depth == 0 {
-                    opening = Some(index);
+                    outermost_opening = Some(index);
                 }
                 depth += 1;
             }
             ')' => {
-                depth = match depth.checked_sub(1) {
-                    Some(depth) => depth,
-                    None => return (name, None),
-                };
-                if depth == 0 && index + character.len_utf8() == name.len() {
-                    let Some(opening) = opening else {
-                        return (name, None);
-                    };
-                    let display_name = name[..opening].trim();
-                    let ty = name[opening + '('.len_utf8()..index].trim();
-
-                    return if display_name.is_empty() || ty.is_empty() {
-                        (name, None)
-                    } else {
-                        (display_name, Some(ty))
-                    };
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index + character.len_utf8() == value.len() {
+                    let opening = outermost_opening?;
+                    return Some((&value[..opening], &value[opening + '('.len_utf8()..index]));
                 }
             }
             _ => {}
         }
+        index += character.len_utf8();
     }
-    (name, None)
+    None
 }
 
 /// Calculates indentation width, advancing tabs to the next multiple of eight columns.
@@ -212,4 +265,102 @@ pub(super) fn indentation(line: &str) -> TextSize {
                 _ => column + 1,
             }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{split_once_at_top_level_colon, split_trailing_parenthesized_group};
+
+    #[test]
+    fn splits_after_nested_brackets() {
+        assert_eq!(
+            split_once_at_top_level_colon("value (dict[str, list[{key: value}]]): Description"),
+            Some(("value (dict[str, list[{key: value}]])", " Description"))
+        );
+    }
+
+    #[test]
+    fn ignores_colons_inside_quoted_strings() {
+        assert_eq!(
+            split_once_at_top_level_colon(r"value (Literal['a\'b:c']): Description"),
+            Some((r"value (Literal['a\'b:c'])", " Description"))
+        );
+    }
+
+    #[test]
+    fn ignores_colons_inside_code_spans() {
+        assert_eq!(
+            split_once_at_top_level_colon("value (`a:b`): Description"),
+            Some(("value (`a:b`)", " Description"))
+        );
+    }
+
+    #[test]
+    fn matches_code_span_delimiter_length() {
+        assert_eq!(
+            split_once_at_top_level_colon("value (``a`b:c``): Description"),
+            Some(("value (``a`b:c``)", " Description"))
+        );
+    }
+
+    #[test]
+    fn recovers_from_unclosed_square_brackets() {
+        assert_eq!(
+            split_once_at_top_level_colon("value [str: Description"),
+            Some(("value [str", " Description"))
+        );
+    }
+
+    #[test]
+    fn does_not_recover_from_unclosed_parentheses() {
+        assert_eq!(
+            split_once_at_top_level_colon("value (str: Description"),
+            None
+        );
+    }
+
+    #[test]
+    fn splits_trailing_parenthesized_group() {
+        assert_eq!(
+            split_trailing_parenthesized_group("value (str)"),
+            Some(("value ", "str"))
+        );
+    }
+
+    #[test]
+    fn splits_nested_parenthesized_group() {
+        assert_eq!(
+            split_trailing_parenthesized_group("value (Callable[(int), tuple[str]])"),
+            Some(("value ", "Callable[(int), tuple[str]]"))
+        );
+    }
+
+    #[test]
+    fn ignores_parentheses_inside_quoted_strings() {
+        assert_eq!(
+            split_trailing_parenthesized_group("value (Literal[')'])"),
+            Some(("value ", "Literal[')']"))
+        );
+    }
+
+    #[test]
+    fn ignores_parentheses_after_escaped_quotes() {
+        assert_eq!(
+            split_trailing_parenthesized_group(r#"value (Literal["a\"b)c"])"#),
+            Some(("value ", r#"Literal["a\"b)c"]"#))
+        );
+    }
+
+    #[test]
+    fn rejects_unclosed_parenthesized_group() {
+        assert_eq!(split_trailing_parenthesized_group("value (str"), None);
+    }
+
+    #[test]
+    fn rejects_parenthesized_group_before_trailing_text() {
+        assert_eq!(
+            split_trailing_parenthesized_group("value (str) or None"),
+            None
+        );
+    }
 }
