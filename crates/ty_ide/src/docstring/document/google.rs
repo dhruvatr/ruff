@@ -37,8 +37,8 @@ use ruff_text_size::{TextRange, TextSize};
 use super::SectionKind;
 use super::preformatted::PreformattedBlockScanner;
 use super::syntax::{
-    ParsedLine, container_block_end, parse_parenthesized_type, parsed_lines,
-    split_once_unbracketed_colon,
+    ParsedLine, container_block_end, parsed_lines, split_once_at_top_level_colon,
+    split_trailing_parenthesized_group,
 };
 
 /// Returns parameter documentation from recognized Google-style parameter sections.
@@ -156,12 +156,27 @@ fn extend_parameter_documentation(parameters: &mut Parameters, lines: &[ParsedLi
 
 /// Parses a parameter item into its display name and description.
 fn parse_parameter(line: &str) -> Option<(&str, &str)> {
-    let (name, description) = split_once_unbracketed_colon(line)?;
-    let (display_name, _) = parse_parenthesized_type(name.trim());
+    let (name, description) = split_once_at_top_level_colon(line)?;
+    let (display_name, _) = split_name_and_type(name.trim());
 
     google_parameter_names(display_name)
         .is_some()
         .then_some((display_name, description.trim()))
+}
+
+/// Splits a display name from a balanced trailing parenthesized type.
+fn split_name_and_type(value: &str) -> (&str, Option<&str>) {
+    let Some((name, ty)) = split_trailing_parenthesized_group(value) else {
+        return (value, None);
+    };
+    let name = name.trim();
+    let ty = ty.trim();
+
+    if name.is_empty() || ty.is_empty() {
+        (value, None)
+    } else {
+        (name, Some(ty))
+    }
 }
 
 /// Returns whether `name` is a valid Python parameter name, including variadic prefixes.
@@ -366,7 +381,7 @@ fn section_item_indent(header: SectionHeader, line: ParsedLine<'_>) -> Option<Te
             SectionKind::Parameters | SectionKind::KeywordArguments | SectionKind::OtherParameters,
         ) => parse_parameter(trimmed).is_some(),
         HeaderKind::Structured(SectionKind::Attributes | SectionKind::Raises) => {
-            split_once_unbracketed_colon(trimmed).is_some_and(|(name, _)| !name.trim().is_empty())
+            split_once_at_top_level_colon(trimmed).is_some_and(|(name, _)| !name.trim().is_empty())
         }
         HeaderKind::Structured(SectionKind::Returns | SectionKind::Yields) => !trimmed.is_empty(),
         HeaderKind::Opaque => false,
@@ -382,7 +397,7 @@ fn is_inline_section_header(line: &str) -> bool {
         return false;
     }
 
-    let Some((name, description)) = split_once_unbracketed_colon(line) else {
+    let Some((name, description)) = split_once_at_top_level_colon(line) else {
         return false;
     };
 
