@@ -50,6 +50,31 @@ pub(in crate::docstring) fn starts_with_markdown_list_item(line: &str) -> bool {
         && matches!(bytes.get(digits + 1), Some(b' ' | b'\t'))
 }
 
+/// Returns whether `text` consists of a complete Markdown code span.
+pub(in crate::docstring) fn is_markdown_code_span(text: &str) -> bool {
+    let opening_backtick_run = text.bytes().take_while(|byte| *byte == b'`').count();
+    let closing_backtick_run = text.bytes().rev().take_while(|byte| *byte == b'`').count();
+
+    if opening_backtick_run == 0 // We didn't find any backticks
+
+        // Backtick runs are of mismatched length
+        || opening_backtick_run != closing_backtick_run
+
+        // Backtick runs overlap
+        || opening_backtick_run > text.len() / 2
+    {
+        return false;
+    }
+
+    let contents = &text[opening_backtick_run..text.len() - opening_backtick_run];
+
+    // Within the matched outer backtick runs, there is no other backtick run
+    // of the same length (i.e., a run that would close the span early).
+    contents
+        .split(|character| character != '`')
+        .all(|run| run.len() != opening_backtick_run)
+}
+
 /// Returns the end of an indented Markdown or reStructuredText container block.
 pub(super) fn container_block_end(lines: &[ParsedLine<'_>], index: usize) -> Option<usize> {
     let marker = lines.get(index)?;
