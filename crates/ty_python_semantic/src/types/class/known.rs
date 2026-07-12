@@ -161,6 +161,12 @@ pub enum KnownClass {
     PydanticStrict,
 }
 
+#[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
+struct KnownClassArgument {
+    #[returns(copy)]
+    class: KnownClass,
+}
+
 impl KnownClass {
     pub(crate) const fn is_bool(self) -> bool {
         matches!(self, Self::Bool)
@@ -1020,10 +1026,21 @@ impl KnownClass {
             KnownClass::Tuple,
             "Use `Type::heterogeneous_tuple` or `Type::homogeneous_tuple` to create `tuple` instances"
         );
-        self.to_class_literal(db)
-            .to_class_type(db)
-            .map(|class| Type::instance(db, class))
-            .unwrap_or_else(Type::unknown)
+
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| Type::unknown(), heap_size=ruff_memory_usage::heap_size)]
+        fn known_class_to_instance<'db>(
+            db: &'db dyn Db,
+            class: KnownClassArgument<'db>,
+        ) -> Type<'db> {
+            class
+                .class(db)
+                .to_class_literal(db)
+                .to_class_type(db)
+                .map(|class| Type::instance(db, class))
+                .unwrap_or_else(Type::unknown)
+        }
+
+        known_class_to_instance(db, KnownClassArgument::new(db, self))
     }
 
     /// Similar to [`KnownClass::to_instance`], but returns the Unknown-specialization where each type
@@ -1125,12 +1142,6 @@ impl KnownClass {
         self,
         db: &dyn Db,
     ) -> Result<Option<StaticClassLiteral<'_>>, KnownClassLookupError<'_>> {
-        #[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
-        struct KnownClassArgument {
-            #[returns(copy)]
-            class: KnownClass,
-        }
-
         #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| Ok(None), heap_size=ruff_memory_usage::heap_size)]
         fn known_class_to_class_literal<'db>(
             db: &'db dyn Db,
