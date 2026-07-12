@@ -156,6 +156,54 @@ class BadWithInitFalse:
     z: float
 ```
 
+Class-level `init=False` disables field ordering checks because no `__init__` is generated. If a
+subclass re-enables `init`, inherited fields participate in ordering checks again:
+
+```py
+@dataclass(init=False)
+class GoodWithClassInitFalse:
+    x: int = 1
+    y: str
+
+    def __init__(self, y: str) -> None:
+        self.y = y
+
+GoodWithClassInitFalse("value")
+
+@dataclass
+class BadSubclass(GoodWithClassInitFalse):  # error: [dataclass-field-order]
+    pass
+
+@dataclass
+class BadSubclassWithCustomInit(GoodWithClassInitFalse):  # error: [dataclass-field-order]
+    def __init__(self, y: str) -> None:
+        self.y = y
+
+@dataclass(init=False)
+class GoodSubclassWithInitFalse(GoodWithClassInitFalse):
+    pass
+
+GoodSubclassWithInitFalse("value")
+
+@dataclass(init=False)
+class InitFalseBaseWithDefault:
+    x: int = 1
+
+@dataclass
+class BadSubclassWithOwnField(InitFalseBaseWithDefault):
+    # error: [dataclass-field-order] "Required field `y` cannot be defined after fields with default values"
+    y: str
+
+from typing import ClassVar
+
+class PlainClassVarMiddle(GoodWithClassInitFalse):
+    y: ClassVar[str]  # error: [invalid-attribute-override]
+
+@dataclass
+class BadPlainClassVarGrandchild(PlainClassVarMiddle):  # error: [dataclass-field-order]
+    pass
+```
+
 Keyword-only fields (using `kw_only=True`) also don't participate in the positional ordering check:
 
 ```toml

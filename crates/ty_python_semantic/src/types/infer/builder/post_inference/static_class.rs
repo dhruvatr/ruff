@@ -13,9 +13,9 @@ use crate::{
     diagnostic::format_enumeration,
     place::{DefinedPlace, Place, TypeOrigin, place_from_bindings, place_from_declarations},
     types::{
-        CallArguments, ClassBase, ClassLiteral, ClassType, KnownClass, KnownInstanceType,
-        MemberLookupPolicy, MetaclassCandidate, Parameters, Signature, SpecialFormType,
-        StaticClassLiteral, Type, TypeVarVariance, binding_type,
+        CallArguments, ClassBase, ClassLiteral, ClassType, DataclassFlags, KnownClass,
+        KnownInstanceType, MemberLookupPolicy, MetaclassCandidate, Parameters, Signature,
+        SpecialFormType, StaticClassLiteral, Type, TypeVarVariance, binding_type,
         call::Argument,
         class::{
             AbstractMethod, CodeGeneratorKind, FieldKind, MetaclassErrorKind,
@@ -898,36 +898,11 @@ pub(crate) fn check_static_class_definitions<'db>(
     {
         let specialization = None;
 
+        let own_fields = class.own_fields(db, specialization, field_policy);
         let mut kw_only_sentinel_fields = vec![];
-        let mut required_after_default_field_names = vec![];
-        let mut has_seen_default_field = false;
-
-        for (name, field) in class.own_fields(db, specialization, field_policy) {
+        for (name, field) in own_fields {
             if field.is_kw_only_sentinel(db) {
                 kw_only_sentinel_fields.push(name);
-                continue;
-            }
-
-            // Extract dataclass field properties
-            let FieldKind::Dataclass {
-                default_ty,
-                init,
-                kw_only,
-                ..
-            } = &field.kind
-            else {
-                continue;
-            };
-
-            // Fields with init=False or kw_only=true don't participate in ordering check
-            if !init || *kw_only == Some(true) {
-                continue;
-            }
-
-            if default_ty.is_some() {
-                has_seen_default_field = true;
-            } else if has_seen_default_field {
-                required_after_default_field_names.push(name);
             }
         }
 
@@ -948,36 +923,54 @@ pub(crate) fn check_static_class_definitions<'db>(
             }
         }
 
-        if !required_after_default_field_names.is_empty() {
-            // Report field ordering violations
-            let body_scope = class.body_scope(db).file_scope_id(db);
-            let use_def_map = index.use_def_map(body_scope);
-            let place_table = index.place_table(body_scope);
+        if class.has_dataclass_param(db, field_policy, DataclassFlags::INIT) {
+            let mut required_after_default_fields = vec![];
+            let mut has_seen_default_field = false;
 
-            for name in required_after_default_field_names {
-                let Some(symbol_id) = place_table.symbol_id(name.as_str()) else {
+            for (name, field) in class.fields(db, specialization, field_policy) {
+                let FieldKind::Dataclass {
+                    default_ty,
+                    init,
+                    kw_only,
+                    ..
+                } = &field.kind
+                else {
                     continue;
                 };
-                for decl_with_constraints in use_def_map.end_of_scope_symbol_declarations(symbol_id)
-                {
-                    let Some(definition) = decl_with_constraints.declaration.definition() else {
-                        continue;
-                    };
-                    let DefinitionKind::AnnotatedAssignment(ann_assign) = definition.kind(db)
-                    else {
-                        continue;
-                    };
-                    let Some(builder) = context
-                        .report_lint(&DATACLASS_FIELD_ORDER, ann_assign.target(context.module()))
-                    else {
-                        continue;
-                    };
+
+                // Fields with init=False or kw_only=true don't participate in ordering check
+                if !init || *kw_only == Some(true) {
+                    continue;
+                }
+
+                if default_ty.is_some() {
+                    has_seen_default_field = true;
+                } else if has_seen_default_field {
+                    required_after_default_fields.push((
+                        name,
+                        own_fields
+                            .get(name)
+                            .and_then(|field| field.first_declaration),
+                    ));
+                }
+            }
+
+            for (name, definition) in required_after_default_fields {
+                let range = definition
+                    .and_then(|definition| {
+                        let DefinitionKind::AnnotatedAssignment(ann_assign) = definition.kind(db)
+                        else {
+                            return None;
+                        };
+                        Some(ann_assign.target(context.module()).range())
+                    })
+                    .unwrap_or_else(|| class.header_range(db));
+
+                if let Some(builder) = context.report_lint(&DATACLASS_FIELD_ORDER, range) {
                     builder.into_diagnostic(format_args!(
                         "Required field `{name}` cannot be defined \
-                                after fields with default values",
+                            after fields with default values",
                     ));
-
-                    break;
                 }
             }
         }
