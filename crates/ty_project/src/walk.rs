@@ -17,8 +17,11 @@ use thiserror::Error;
 /// to access fields from within the walker.
 #[derive(Debug)]
 pub(crate) struct ProjectFilesFilter<'a> {
-    /// The same as [`Project::included_paths_or_root`].
+    /// The paths explicitly included on the CLI.
     included_paths: &'a [SystemPathBuf],
+
+    /// The project root used when there are no explicit included paths.
+    project_root: &'a SystemPath,
 
     /// The resolved `src.include` and `src.exclude` filter.
     src_filter: &'a IncludeExcludeFilter,
@@ -29,7 +32,8 @@ pub(crate) struct ProjectFilesFilter<'a> {
 impl<'a> ProjectFilesFilter<'a> {
     pub(crate) fn from_project(db: &'a dyn Db, project: Project) -> Self {
         Self {
-            included_paths: project.included_paths_or_root(db),
+            included_paths: project.included_paths_list(db),
+            project_root: project.root(db),
             src_filter: &project.settings(db).src().files,
             force_exclude: project.force_exclude(db),
         }
@@ -43,25 +47,30 @@ impl<'a> ProjectFilesFilter<'a> {
         &self,
         path: &SystemPath,
         mode: GlobFilterCheckMode,
-    ) -> Option<CheckPathMatch> {
+    ) -> Option<CheckPathMatch<'_>> {
         match mode {
             GlobFilterCheckMode::TopDown => Some(CheckPathMatch::Partial),
             GlobFilterCheckMode::Adhoc => {
-                self.included_paths
+                if self.included_paths.is_empty() {
+                    return path
+                        .starts_with(self.project_root)
+                        .then_some(CheckPathMatch::Partial);
+                }
+
+                let included_path = self
+                    .included_paths
                     .iter()
-                    .filter_map(|included_path| {
-                        if let Ok(relative_path) = path.strip_prefix(included_path) {
-                            // Exact matches are always included, unless forced to exclude
-                            if relative_path.as_str().is_empty() && !self.force_exclude {
-                                Some(CheckPathMatch::Full)
-                            } else {
-                                Some(CheckPathMatch::Partial)
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .max()
+                    .filter(|included_path| path.starts_with(included_path))
+                    .max_by_key(|included_path| included_path.as_str().len())?;
+                let included_path = included_path.as_path();
+
+                if path == included_path && !self.force_exclude {
+                    Some(CheckPathMatch::Full)
+                } else if !self.force_exclude {
+                    Some(CheckPathMatch::ExplicitDescendant(included_path))
+                } else {
+                    Some(CheckPathMatch::Partial)
+                }
             }
         }
     }
@@ -87,6 +96,9 @@ impl<'a> ProjectFilesFilter<'a> {
         match self.match_included_paths(path, mode) {
             None => IncludeResult::NotIncluded,
             Some(CheckPathMatch::Partial) => self.src_filter.is_file_included(path, mode),
+            Some(CheckPathMatch::ExplicitDescendant(root)) => {
+                self.src_filter.is_file_included_below(path, root)
+            }
             Some(CheckPathMatch::Full) => IncludeResult::Included {
                 literal_match: Some(true),
             },
@@ -103,6 +115,9 @@ impl<'a> ProjectFilesFilter<'a> {
             Some(CheckPathMatch::Partial) => {
                 self.src_filter.is_directory_maybe_included(path, mode)
             }
+            Some(CheckPathMatch::ExplicitDescendant(root)) => self
+                .src_filter
+                .is_directory_maybe_included_below(path, root),
             Some(CheckPathMatch::Full) => IncludeResult::Included {
                 literal_match: Some(true),
             },
@@ -110,10 +125,13 @@ impl<'a> ProjectFilesFilter<'a> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum CheckPathMatch {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CheckPathMatch<'a> {
     /// The path is a partial match of the checked path (it's a sub path)
     Partial,
+
+    /// The path is below an explicitly included CLI directory.
+    ExplicitDescendant(&'a SystemPath),
 
     /// The path matches a check path exactly.
     Full,

@@ -680,16 +680,10 @@ pub(crate) fn should_check_file(db: &dyn Db, file: File) -> bool {
     // project. Both sets change frequently, and a dependency on either invalidates this query when
     // any file is added or removed. Virtual paths bypass this check because they don't have a
     // system path.
-    // Descendants of an explicitly included directory need to fall through to the indexed file
-    // set. Explicit CLI paths override exclusions unless `--force-exclude` is set, but the ad-hoc
-    // inclusion check still applies those exclusions.
-    if path.as_system_path().is_some_and(|path| {
-        !project.is_file_included(db, path).is_included()
-            && !project
-                .included_paths_list(db)
-                .iter()
-                .any(|included| path.starts_with(included))
-    }) {
+    if path
+        .as_system_path()
+        .is_some_and(|path| !project.is_file_included(db, path).is_included())
+    {
         tracing::trace!("Not checking {path} because it is not included in the project");
         return false;
     }

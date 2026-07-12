@@ -42,12 +42,30 @@ impl IncludeExcludeFilter {
     ) -> IncludeResult {
         if self.exclude.match_directory(path, mode) {
             IncludeResult::Excluded
-        } else if self.include.match_directory(path) {
+        } else {
+            self.is_directory_maybe_included_ignoring_excludes(path)
+        }
+    }
+
+    fn is_directory_maybe_included_ignoring_excludes(&self, path: &SystemPath) -> IncludeResult {
+        if self.include.match_directory(path) {
             IncludeResult::Included {
                 literal_match: None,
             }
         } else {
             IncludeResult::NotIncluded
+        }
+    }
+
+    pub(crate) fn is_directory_maybe_included_below(
+        &self,
+        path: &SystemPath,
+        root: &SystemPath,
+    ) -> IncludeResult {
+        if self.exclude.match_directory_below(path, root) {
+            IncludeResult::Excluded
+        } else {
+            self.is_directory_maybe_included_ignoring_excludes(path)
         }
     }
 
@@ -59,15 +77,31 @@ impl IncludeExcludeFilter {
         if self.exclude.match_file(path, mode) {
             IncludeResult::Excluded
         } else {
-            match self.include.match_file(path) {
-                MatchFile::Literal => IncludeResult::Included {
-                    literal_match: Some(true),
-                },
-                MatchFile::Pattern => IncludeResult::Included {
-                    literal_match: Some(false),
-                },
-                MatchFile::No => IncludeResult::NotIncluded,
-            }
+            self.is_file_included_ignoring_excludes(path)
+        }
+    }
+
+    fn is_file_included_ignoring_excludes(&self, path: &SystemPath) -> IncludeResult {
+        match self.include.match_file(path) {
+            MatchFile::Literal => IncludeResult::Included {
+                literal_match: Some(true),
+            },
+            MatchFile::Pattern => IncludeResult::Included {
+                literal_match: Some(false),
+            },
+            MatchFile::No => IncludeResult::NotIncluded,
+        }
+    }
+
+    pub(crate) fn is_file_included_below(
+        &self,
+        path: &SystemPath,
+        root: &SystemPath,
+    ) -> IncludeResult {
+        if self.exclude.match_file_below(path, root) {
+            IncludeResult::Excluded
+        } else {
+            self.is_file_included_ignoring_excludes(path)
         }
     }
 }

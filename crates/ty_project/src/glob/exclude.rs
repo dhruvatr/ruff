@@ -39,6 +39,16 @@ impl ExcludeFilter {
         self.matches(path, mode, false)
     }
 
+    /// Returns `true` if the file or an ancestor below `root` is excluded.
+    pub(crate) fn match_file_below(&self, path: &SystemPath, root: &SystemPath) -> bool {
+        self.matches_below(path, root, false)
+    }
+
+    /// Returns `true` if the directory or an ancestor below `root` is excluded.
+    pub(crate) fn match_directory_below(&self, path: &SystemPath, root: &SystemPath) -> bool {
+        self.matches_below(path, root, true)
+    }
+
     fn matches(&self, path: &SystemPath, mode: GlobFilterCheckMode, directory: bool) -> bool {
         // If the path is excluded, return `ignore`
         if self.ignore.matched(path, directory).is_ignore() {
@@ -58,6 +68,19 @@ impl ExcludeFilter {
                     .any(|ancestor| self.ignore.matched(ancestor, true).is_ignore())
             }
         }
+    }
+
+    fn matches_below(&self, path: &SystemPath, root: &SystemPath, directory: bool) -> bool {
+        if !path.starts_with(root) {
+            return self.matches(path, GlobFilterCheckMode::Adhoc, directory);
+        }
+
+        self.ignore.matched(path, directory).is_ignore()
+            || path
+                .ancestors()
+                .skip(1)
+                .take_while(|ancestor| *ancestor != root)
+                .any(|ancestor| self.ignore.matched(ancestor, true).is_ignore())
     }
 }
 
