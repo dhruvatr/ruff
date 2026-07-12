@@ -223,6 +223,41 @@ reveal_type(d.y)  # revealed: str
 reveal_type(d.z)  # revealed: bool
 ```
 
+Class variables override inherited dataclass fields. Their position is retained if a subclass turns
+them back into fields:
+
+```py
+@dataclass
+class InstanceFieldBase:
+    y: str
+    x: int = 1
+
+@dataclass
+class ClassVarOverride(InstanceFieldBase):
+    y: ClassVar[str]  # error: [invalid-attribute-override]
+
+reveal_type(ClassVarOverride.__init__)  # revealed: (self: ClassVarOverride, x: int = 1) -> None
+
+@dataclass
+class InheritedClassVarOverride(ClassVarOverride):
+    pass
+
+reveal_type(InheritedClassVarOverride.__init__)  # revealed: (self: InheritedClassVarOverride, x: int = 1) -> None
+
+@dataclass
+class ClassVarBase:
+    x: int
+    y: ClassVar[str]
+    z: float = 1.0
+
+@dataclass
+class ReactivatedField(ClassVarBase):
+    y: str  # error: [invalid-attribute-override]
+
+# The reactivated `y` field retains its position before `z`.
+reveal_type(ReactivatedField.__init__)  # revealed: (self: ReactivatedField, x: int, y: str, z: int | float = ...) -> None
+```
+
 Function declarations do not affect the signature of `__init__`:
 
 ```py

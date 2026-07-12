@@ -1,5 +1,5 @@
 use compact_str::CompactString;
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use ruff_db::{
     diagnostic::Span,
     files::File,
@@ -119,6 +119,18 @@ pub struct StaticClassLiteral<'db> {
 
 // The Salsa heap is tracked separately.
 impl get_size2::GetSize for StaticClassLiteral<'_> {}
+
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+enum OwnFieldOrderEntry {
+    Field(usize),
+    ClassVar(Name),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+struct OwnFieldData<'db> {
+    fields: FxIndexMap<Name, Field<'db>>,
+    order: Box<[OwnFieldOrderEntry]>,
+}
 
 #[salsa::tracked]
 impl<'db> StaticClassLiteral<'db> {
@@ -1980,13 +1992,18 @@ impl<'db> StaticClassLiteral<'db> {
             DynamicTypedDict(DynamicTypedDictLiteral<'db>),
         }
 
+        enum EffectiveField<'db> {
+            Field(Field<'db>),
+            ClassVar,
+        }
+
         debug_assert_ne!(
             field_policy,
             CodeGeneratorKind::NamedTuple,
             "Collecting `fields` for NamedTuples should short-circuit in `fields()`"
         );
 
-        let mut map: FxIndexMap<_, _> = self
+        let field_sources = self
             .iter_mro(db, specialization)
             .rev()
             .filter_map(|superclass| {
@@ -2008,38 +2025,70 @@ impl<'db> StaticClassLiteral<'db> {
                 }
 
                 None
-            })
-            .flat_map(|source| match source {
-                FieldSource::Static(class, specialization) => Either::Left(
-                    class
-                        .own_fields(db, specialization, field_policy)
-                        .iter()
-                        .map(|(name, field)| (name.clone(), field.clone())),
-                ),
-                FieldSource::DynamicTypedDict(typeddict) => {
-                    Either::Right(typeddict.items(db).iter().map(|(name, td_field)| {
-                        (
-                            name.clone(),
-                            Field {
-                                declared_ty: td_field.declared_ty,
-                                kind: FieldKind::TypedDict {
-                                    is_required: td_field.is_required(),
-                                    is_read_only: td_field.is_read_only(),
-                                },
-                                first_declaration: td_field.first_declaration(),
-                            },
-                        )
-                    }))
-                }
-            })
-            // KW_ONLY sentinels are markers, not real fields. Exclude them so
-            // they cannot shadow an inherited field with the same name.
-            .filter(|(_, field)| !field.is_kw_only_sentinel(db))
-            // We collect into a FxOrderMap here to deduplicate attributes
-            .collect();
+            });
 
-        map.shrink_to_fit();
-        map
+        let mut entries = FxIndexMap::default();
+        for source in field_sources {
+            match source {
+                FieldSource::Static(class, specialization) => {
+                    let own = class.own_field_data(db, specialization, field_policy);
+                    if own.order.is_empty() {
+                        for (name, field) in &own.fields {
+                            if !field.is_kw_only_sentinel(db) {
+                                entries.insert(name.clone(), EffectiveField::Field(field.clone()));
+                            }
+                        }
+                    } else {
+                        for entry in &own.order {
+                            match entry {
+                                // `KW_ONLY` sentinels are markers, not real fields. Exclude them so
+                                // they cannot shadow an inherited field with the same name.
+                                OwnFieldOrderEntry::Field(index) => {
+                                    let Some((name, field)) = own.fields.get_index(*index) else {
+                                        continue;
+                                    };
+                                    if !field.is_kw_only_sentinel(db) {
+                                        entries.insert(
+                                            name.clone(),
+                                            EffectiveField::Field(field.clone()),
+                                        );
+                                    }
+                                }
+                                OwnFieldOrderEntry::ClassVar(name) => {
+                                    // Dataclasses retain class variables as ordered pseudo-fields.
+                                    // Keeping the entry preserves its position if a subclass turns
+                                    // the name back into a field.
+                                    entries.insert(name.clone(), EffectiveField::ClassVar);
+                                }
+                            }
+                        }
+                    }
+                }
+                FieldSource::DynamicTypedDict(typeddict) => {
+                    entries.extend(typeddict.items(db).iter().map(|(name, td_field)| {
+                        let field = Field {
+                            declared_ty: td_field.declared_ty,
+                            kind: FieldKind::TypedDict {
+                                is_required: td_field.is_required(),
+                                is_read_only: td_field.is_read_only(),
+                            },
+                            first_declaration: td_field.first_declaration(),
+                        };
+                        (name.clone(), EffectiveField::Field(field))
+                    }));
+                }
+            }
+        }
+
+        let mut fields = entries
+            .into_iter()
+            .filter_map(|(name, entry)| match entry {
+                EffectiveField::Field(field) => Some((name, field)),
+                EffectiveField::ClassVar => None,
+            })
+            .collect::<FxIndexMap<_, _>>();
+        fields.shrink_to_fit();
+        fields
     }
 
     pub(crate) fn validate_members(self, context: &InferContext<'db, '_>) {
@@ -2121,17 +2170,26 @@ impl<'db> StaticClassLiteral<'db> {
     /// including properties inherited from class-level dataclass parameters (like `kw_only=True`)
     /// and dataclass-transform parameters (like `kw_only_default=True`). They do not represent
     /// only what is explicitly specified in each field definition.
-    #[salsa::tracked(
-        returns(ref),
-        cycle_initial=|_, _, _, _, _| FxIndexMap::default(),
-        heap_size=get_size2::GetSize::get_heap_size
-    )]
     pub(crate) fn own_fields(
         self,
         db: &'db dyn Db,
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
-    ) -> FxIndexMap<Name, Field<'db>> {
+    ) -> &'db FxIndexMap<Name, Field<'db>> {
+        &self.own_field_data(db, specialization, field_policy).fields
+    }
+
+    #[salsa::tracked(
+        returns(ref),
+        cycle_initial=|_, _, _, _, _| OwnFieldData::default(),
+        heap_size=get_size2::GetSize::get_heap_size
+    )]
+    fn own_field_data(
+        self,
+        db: &'db dyn Db,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> OwnFieldData<'db> {
         let class_body_scope = self.body_scope(db);
         let table = place_table(db, class_body_scope);
 
@@ -2197,11 +2255,20 @@ impl<'db> StaticClassLiteral<'db> {
             .sort_unstable_by_key(|(first_declaration_order, _, _)| *first_declaration_order);
 
         let mut attributes = FxIndexMap::default();
+        let mut order = None;
         for (_, symbol_id, result) in field_declarations {
             let symbol = table.symbol(symbol_id);
             let first_declaration = result.first_declaration;
             let attr = result.ignore_conflicting_declarations();
             if attr.is_class_var() {
+                if field_policy.is_dataclass_like() {
+                    let order = order.get_or_insert_with(|| {
+                        (0..attributes.len())
+                            .map(OwnFieldOrderEntry::Field)
+                            .collect::<Vec<_>>()
+                    });
+                    order.push(OwnFieldOrderEntry::ClassVar(symbol.name().clone()));
+                }
                 continue;
             }
 
@@ -2309,13 +2376,19 @@ impl<'db> StaticClassLiteral<'db> {
                     *kw = dataclass_kw_only_default;
                 }
 
-                attributes.insert(symbol.name().clone(), field);
+                let (index, _) = attributes.insert_full(symbol.name().clone(), field);
+                if let Some(order) = &mut order {
+                    order.push(OwnFieldOrderEntry::Field(index));
+                }
             }
         }
 
         attributes.shrink_to_fit();
 
-        attributes
+        OwnFieldData {
+            fields: attributes,
+            order: order.unwrap_or_default().into_boxed_slice(),
+        }
     }
 
     /// Look up an instance attribute (available in `__dict__`) of the given name.
